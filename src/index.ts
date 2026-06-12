@@ -33,6 +33,11 @@ import {
   GRADE_THRESHOLDS,
   DEFAULT_SENSITIVE_FIELD_PATTERNS,
   DESCRIPTION_REQUIRED_FIELDS,
+  validateAndNormalizeWeights,
+  getIndustryConfig,
+  safePercentage,
+  clampScore,
+  LOW_SCORE_THRESHOLD,
 } from './config';
 
 export {
@@ -52,6 +57,11 @@ export {
   GRADE_THRESHOLDS,
   DEFAULT_SENSITIVE_FIELD_PATTERNS,
   DESCRIPTION_REQUIRED_FIELDS,
+  validateAndNormalizeWeights,
+  getIndustryConfig,
+  safePercentage,
+  clampScore,
+  LOW_SCORE_THRESHOLD,
 };
 
 export type { TextReportOptions, JsonReportOptions };
@@ -70,6 +80,7 @@ export class DataQualitySDK {
       enableDetailLogByDefault: options.enableDetailLogByDefault,
       customSensitiveFieldPatterns: options.customSensitiveFieldPatterns,
       customIndustryConfigs: options.customIndustryConfigs,
+      autoNormalizeWeights: options.autoNormalizeWeights,
     });
     this.batchService = new BatchScoringService(options);
     this.reportGenerator = new ReportGenerator();

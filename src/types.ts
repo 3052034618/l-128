@@ -6,7 +6,8 @@ export type IndustryType =
   | 'transportation'
   | 'government'
   | 'manufacturing'
-  | 'general';
+  | 'general'
+  | string;
 
 export type RiskLevel = 'critical' | 'high' | 'medium' | 'low';
 
@@ -73,6 +74,7 @@ export interface ScoringInput {
   industry?: IndustryType;
   customWeights?: Partial<ScoringWeights>;
   enableDetailLog?: boolean;
+  industryConfigVersion?: string;
 }
 
 export interface BatchScoringInput {
@@ -81,7 +83,10 @@ export interface BatchScoringInput {
     customWeights?: Partial<ScoringWeights>;
     industry?: IndustryType;
     enableDetailLog?: boolean;
+    industryConfigVersion?: string;
+    autoNormalizeWeights?: boolean;
   };
+  autoNormalizeWeights?: boolean;
 }
 
 export interface ScoringWeights {
@@ -93,6 +98,14 @@ export interface ScoringWeights {
   authorization: number;
 }
 
+export interface WeightValidationResult {
+  isValid: boolean;
+  normalizedWeights: ScoringWeights;
+  warnings: string[];
+  wasNormalized: boolean;
+  originalSum: number;
+}
+
 export interface FieldCompletenessResult {
   score: number;
   maxScore: number;
@@ -102,6 +115,8 @@ export interface FieldCompletenessResult {
   missingOptionalFields: string[];
   fieldsWithDescription: string[];
   fieldsWithoutDescription: string[];
+  ruleVersion?: string;
+  ruleDescription?: string;
 }
 
 export interface SampleCompletenessResult {
@@ -126,6 +141,7 @@ export interface SensitiveFieldInfo {
   sensitivityLevel: DataSensitivityLevel;
   description: string;
   hasAuthorization: boolean;
+  matchedPattern?: string;
 }
 
 export type SensitiveType =
@@ -146,7 +162,9 @@ export interface UpdateFrequencyResult {
   currentFrequency: UpdateFrequencyType;
   isSpecified: boolean;
   hasLastUpdated: boolean;
+  hasInvalidLastUpdated: boolean;
   daysSinceLastUpdate?: number;
+  lastUpdatedRawValue?: string;
 }
 
 export interface DescriptionCompletenessResult {
@@ -164,6 +182,14 @@ export interface AuthorizationResult {
   scopeCoverage: number;
 }
 
+export interface RiskEvidence {
+  type: 'field' | 'sample_rate' | 'date_check' | 'weight' | 'config' | 'count' | 'value';
+  description: string;
+  value?: any;
+  expected?: any;
+  fields?: string[];
+}
+
 export interface RiskItem {
   id: string;
   category: string;
@@ -171,6 +197,7 @@ export interface RiskItem {
   message: string;
   suggestion: string;
   relatedFields?: string[];
+  evidence?: RiskEvidence[];
 }
 
 export interface DetailLogEntry {
@@ -197,11 +224,33 @@ export interface ScoringResult {
   risks: RiskItem[];
   suggestions: string[];
   detailLogs?: DetailLogEntry[];
+  weightWarnings?: string[];
   metadata: {
     scoredAt: string;
     industry: IndustryType;
     weights: ScoringWeights;
+    originalWeights?: ScoringWeights;
+    weightsNormalized: boolean;
+    industryConfigVersion?: string;
+    industryConfigDescription?: string;
   };
+}
+
+export interface HighFrequencyRisk {
+  id: string;
+  message: string;
+  level: RiskLevel;
+  category: string;
+  occurrenceCount: number;
+  affectedProducts: string[];
+}
+
+export interface LowScoringDimension {
+  dimension: string;
+  dimensionKey: keyof ScoringWeights;
+  averageScore: number;
+  belowThresholdCount: number;
+  affectedProducts: string[];
 }
 
 export interface BatchScoringResult {
@@ -210,10 +259,13 @@ export interface BatchScoringResult {
     totalItems: number;
     gradeDistribution: Record<QualityGrade, number>;
     averageScore: number;
+    highFrequencyRisks: HighFrequencyRisk[];
+    lowScoringDimensions: LowScoringDimension[];
   };
 }
 
 export interface IndustryRequiredFieldsConfig {
+  version?: string;
   required: string[];
   recommended: string[];
   description: string;
@@ -223,6 +275,7 @@ export interface SDKOptions {
   defaultIndustry?: IndustryType;
   defaultWeights?: Partial<ScoringWeights>;
   enableDetailLogByDefault?: boolean;
+  autoNormalizeWeights?: boolean;
   customIndustryConfigs?: Record<string, IndustryRequiredFieldsConfig>;
   customSensitiveFieldPatterns?: Array<{
     pattern: RegExp;
@@ -230,4 +283,5 @@ export interface SDKOptions {
     level: DataSensitivityLevel;
     description: string;
   }>;
+  defaultIndustryConfigVersion?: string;
 }

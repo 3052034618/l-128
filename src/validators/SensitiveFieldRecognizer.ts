@@ -10,6 +10,7 @@ import {
 import {
   DEFAULT_SENSITIVE_FIELD_PATTERNS,
   SensitiveFieldPattern,
+  clampScore,
 } from '../config';
 import { DetailLogger } from '../core/logger';
 
@@ -54,6 +55,7 @@ export class SensitiveFieldRecognizer {
           sensitivityLevel: matchedPattern.level,
           description: matchedPattern.description,
           hasAuthorization,
+          matchedPattern: matchedPattern.patternKey || matchedPattern.pattern.toString(),
         });
 
         this.logger.debug('SensitiveFieldRecognizer', `识别到敏感字段: ${field.name} (${matchedPattern.description}, 级别: ${matchedPattern.level})`);
@@ -78,21 +80,18 @@ export class SensitiveFieldRecognizer {
       }
     }
 
-    let score = 100;
-    const secretPenalty = sensitiveFields.filter(
-      (f) => f.sensitivityLevel === 'secret'
-    ).length * 15;
-    const confidentialPenalty = sensitiveFields.filter(
-      (f) => f.sensitivityLevel === 'confidential'
-    ).length * 8;
-    const internalPenalty = sensitiveFields.filter(
-      (f) => f.sensitivityLevel === 'internal'
-    ).length * 3;
-    const unauthorizedPenalty = sensitiveFields.filter(
-      (f) => !f.hasAuthorization
-    ).length * 10;
+    const secretCount = sensitiveFields.filter((f) => f.sensitivityLevel === 'secret').length;
+    const confidentialCount = sensitiveFields.filter((f) => f.sensitivityLevel === 'confidential').length;
+    const internalCount = sensitiveFields.filter((f) => f.sensitivityLevel === 'internal').length;
+    const unauthorizedCount = sensitiveFields.filter((f) => !f.hasAuthorization).length;
 
-    score = Math.max(0, 100 - secretPenalty - confidentialPenalty - internalPenalty - unauthorizedPenalty);
+    const secretPenalty = secretCount * 15;
+    const confidentialPenalty = confidentialCount * 8;
+    const internalPenalty = internalCount * 3;
+    const unauthorizedPenalty = unauthorizedCount * 10;
+
+    const rawScore = 100 - secretPenalty - confidentialPenalty - internalPenalty - unauthorizedPenalty;
+    const score = clampScore(rawScore);
 
     this.logger.debug('SensitiveFieldRecognizer', '敏感字段评分详情', {
       sensitiveFieldCount: sensitiveFields.length,
@@ -115,6 +114,21 @@ export class SensitiveFieldRecognizer {
         message: `${unauthorizedSensitiveFields.length} 个敏感字段未获得明确授权: ${unauthorizedSensitiveFields.map((f) => f.fieldName).join(', ')}`,
         suggestion: '请在授权范围中明确说明这些敏感字段的使用目的、使用方式和数据保留策略，确保合规性',
         relatedFields: unauthorizedSensitiveFields.map((f) => f.fieldName),
+        evidence: [
+          {
+            type: 'field',
+            description: '未授权敏感字段详情',
+            fields: unauthorizedSensitiveFields.map((f) => f.fieldName),
+            value: unauthorizedSensitiveFields.map((f) =>
+              `${f.fieldName}(${f.description}, 级别: ${f.sensitivityLevel}, 模式: ${f.matchedPattern})`
+            ).join('; '),
+          },
+          {
+            type: 'count',
+            description: '各级别敏感字段统计',
+            value: `secret: ${secretCount}, confidential: ${confidentialCount}, internal: ${internalCount}, 未授权: ${unauthorizedCount}`,
+          },
+        ],
       });
     }
 
@@ -127,6 +141,16 @@ export class SensitiveFieldRecognizer {
         message: `包含 ${secretFields.length} 个核心敏感(secret)字段: ${secretFields.map((f) => `${f.fieldName}(${f.description})`).join(', ')}`,
         suggestion: '核心敏感字段需特别关注，建议进行脱敏处理、访问控制加强和加密存储，并进行数据影响评估(DPIA)',
         relatedFields: secretFields.map((f) => f.fieldName),
+        evidence: [
+          {
+            type: 'field',
+            description: '核心敏感字段列表',
+            fields: secretFields.map((f) => f.fieldName),
+            value: secretFields.map((f) =>
+              `${f.fieldName}: ${f.description} (匹配模式: ${f.matchedPattern})`
+            ).join('; '),
+          },
+        ],
       });
     }
 
@@ -138,6 +162,13 @@ export class SensitiveFieldRecognizer {
         message: `共检测到 ${sensitiveFields.length} 个敏感字段`,
         suggestion: '建议对所有敏感字段进行分类分级管理，建立数据访问审计机制，确保数据处理符合相关法规要求',
         relatedFields: sensitiveFields.map((f) => f.fieldName),
+        evidence: [
+          {
+            type: 'count',
+            description: '敏感字段统计',
+            value: `总计 ${sensitiveFields.length} 个，其中 secret: ${secretCount}, confidential: ${confidentialCount}, internal: ${internalCount}`,
+          },
+        ],
       });
     }
 
@@ -155,8 +186,12 @@ export class SensitiveFieldRecognizer {
 
   private matchSensitivePattern(fieldName: string): SensitiveFieldPattern | null {
     for (const pattern of this.patterns) {
-      if (pattern.pattern.test(fieldName)) {
-        return pattern;
+      try {
+        if (pattern.pattern.test(fieldName)) {
+          return pattern;
+        }
+      } catch {
+        continue;
       }
     }
     return null;
@@ -166,23 +201,21 @@ export class SensitiveFieldRecognizer {
     sensitivityLevel: DataSensitivityLevel,
     authorization: AuthorizationScope
   ): boolean {
-    const hasPurpose = authorization.allowedPurposes && authorization.allowedPurposes.length > 0;
+    const hasPurpose = !!(authorization.allowedPurposes && authorization.allowedPurposes.length > 0);
 
     if (sensitivityLevel === 'public' || sensitivityLevel === 'internal') {
       return hasPurpose;
     }
 
     if (sensitivityLevel === 'confidential') {
-      return (
-        hasPurpose &&
-        authorization.retentionPeriod !== undefined
-      );
+      return hasPurpose && authorization.retentionPeriod !== undefined && authorization.retentionPeriod.trim().length > 0;
     }
 
     if (sensitivityLevel === 'secret') {
       return (
         hasPurpose &&
         authorization.retentionPeriod !== undefined &&
+        authorization.retentionPeriod.trim().length > 0 &&
         authorization.allowedRecipients !== undefined &&
         authorization.allowedRecipients.length > 0
       );
