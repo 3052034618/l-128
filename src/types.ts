@@ -257,7 +257,7 @@ export interface RuleQueryResult {
 }
 
 export interface RuleStatusTransition {
-  fromStatus: RuleStatus;
+  fromStatus: RuleStatus | null;
   toStatus: RuleStatus;
   changedAt: string;
   changedBy?: string;
@@ -310,7 +310,16 @@ export interface ScoringResult {
     industryConfigSource?: 'built-in' | 'custom' | 'override';
     industryConfigStatus?: RuleStatus;
     industryConfigEffectiveAt?: string;
+    industryConfigRegisteredAt?: string;
+    industryConfigPublishedAt?: string;
+    industryConfigTrialStartAt?: string;
+    industryConfigTrialEndAt?: string;
+    industryConfigDeprecatedAt?: string;
+    industryConfigIsOverridden?: boolean;
+    industryConfigIsDefault?: boolean;
+    industryConfigChangeLog?: string;
     ruleFallbackReason?: string;
+    ruleFallbackInfo?: RuleFallbackInfo;
   };
 }
 
@@ -491,7 +500,29 @@ export interface AuditDeliveryPackage {
     version: string;
     description: string;
     status: RuleStatus;
-    source: string;
+    source: 'built-in' | 'custom' | 'override';
+    isOverridden: boolean;
+    isDefault: boolean;
+    registeredAt: string;
+    effectiveAt?: string;
+    publishedAt?: string;
+    trialStartAt?: string;
+    trialEndAt?: string;
+    deprecatedAt?: string;
+    changeLog?: string;
+    fallbackInfo?: {
+      requestedIndustry?: string;
+      requestedVersion?: string;
+      fallbackIndustry: string;
+      fallbackVersion: string;
+      reason: string;
+    };
+    lastStatusChange?: {
+      fromStatus: RuleStatus | null;
+      toStatus: RuleStatus;
+      changedAt: string;
+      remark?: string;
+    };
   };
 }
 
@@ -580,6 +611,9 @@ export interface RuleImpactAnalysisResult {
     change: number;
   }>;
   recommendations: string[];
+  productDetails?: ProductImpactDetail[];
+  releaseRiskList?: ReleaseRiskItem[];
+  groupedSummary?: GroupedImpactSummary;
 }
 
 export interface RuleImpactAnalysisOptions {
@@ -588,4 +622,114 @@ export interface RuleImpactAnalysisOptions {
   targetVersion?: string;
   includeProductDetails?: boolean;
   riskThreshold?: RiskLevel;
+}
+
+export interface ProductImpactDetail {
+  productId: string;
+  baselineGrade: QualityGrade;
+  targetGrade: QualityGrade;
+  gradeChange: 'improved' | 'declined' | 'unchanged';
+  baselineScore: number;
+  targetScore: number;
+  scoreChange: number;
+  newRisks: RiskItem[];
+  resolvedRisks: RiskItem[];
+  increasedRisks: RiskItem[];
+  dimensionChanges: Array<{
+    dimensionKey: keyof ScoringWeights;
+    dimensionName: string;
+    baselineScore: number;
+    targetScore: number;
+    scoreChange: number;
+  }>;
+}
+
+export interface ReleaseRiskItem {
+  riskId: string;
+  productId: string;
+  riskLevel: RiskLevel;
+  riskCategory: string;
+  description: string;
+  impactType: 'new_risk' | 'grade_decline' | 'score_drop' | 'risk_increase';
+  severity: 'critical' | 'high' | 'medium' | 'low';
+  recommendation: string;
+}
+
+export interface GroupedImpactSummary {
+  byIndustry: Record<string, {
+    total: number;
+    declined: number;
+    newRisks: number;
+    averageScoreChange: number;
+  }>;
+  byRiskCategory: Record<string, {
+    totalProducts: number;
+    totalOccurrences: number;
+    highPriorityCount: number;
+  }>;
+  byGradeDecline: Record<string, {
+    count: number;
+    products: string[];
+    averageScoreDrop: number;
+  }>;
+}
+
+export interface RuleReviewItem {
+  industry: IndustryType;
+  version: string;
+  status: RuleStatus;
+  description: string;
+  source: 'built-in' | 'custom' | 'override';
+  isDefault: boolean;
+  isOverridden: boolean;
+  registeredAt: string;
+  publishedAt?: string;
+  trialStartAt?: string;
+  trialEndAt?: string;
+  deprecatedAt?: string;
+  lastChange: {
+    fromStatus: RuleStatus | null;
+    toStatus: RuleStatus;
+    changedAt: string;
+    remark?: string;
+  };
+  impactSummary?: {
+    analyzedProducts: number;
+    gradeDeclines: number;
+    newRisks: number;
+    averageScoreChange: number;
+    lastAnalyzedAt?: string;
+  };
+  publishRecommendation: 'approve' | 'caution' | 'block' | 'pending';
+  recommendationReason: string;
+  statusHistory: RuleStatusTransition[];
+  requiredFields: string[];
+  recommendedFields: string[];
+  changeLog?: string;
+}
+
+export interface RuleReviewView {
+  reviewId: string;
+  generatedAt: string;
+  industries: IndustryType[];
+  rulesByIndustry: Record<IndustryType, RuleReviewItem[]>;
+  summary: {
+    totalRules: number;
+    draftCount: number;
+    trialCount: number;
+    publishedCount: number;
+    deprecatedCount: number;
+    pendingReviewCount: number;
+    recommendApproveCount: number;
+    recommendCautionCount: number;
+    recommendBlockCount: number;
+  };
+}
+
+export interface RuleReviewOptions {
+  industries?: IndustryType[];
+  includeStatuses?: RuleStatus[];
+  includeImpactAnalysis?: boolean;
+  impactAnalysisInputs?: ScoringInput[];
+  baselineVersion?: string;
 }

@@ -45,6 +45,8 @@ export class BatchScoringService {
       autoNormalizeWeights: options?.autoNormalizeWeights,
       handleZeroWeightAs: options?.handleZeroWeightAs,
       auditPassThreshold: options?.auditPassThreshold,
+      usePublishedRulesOnly: options?.usePublishedRulesOnly,
+      allowTrialRules: options?.allowTrialRules,
     });
     this.logger = new DetailLogger(options?.enableDetailLogByDefault ?? false);
   }

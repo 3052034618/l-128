@@ -108,7 +108,7 @@ export class IndustryRuleRegistry {
 
     this.storeRule(industry, registeredConfig);
     this.recordStatusTransition(industry, version, {
-      fromStatus: 'draft',
+      fromStatus: status === 'draft' ? null : 'draft',
       toStatus: status,
       changedAt: now,
       remark: '规则注册',
@@ -421,6 +421,11 @@ export class IndustryRuleRegistry {
       versions = versions.filter((v) => industryRules.get(v)!.status === status);
     }
     return versions.sort((a, b) => b.localeCompare(a));
+  }
+
+  public isOverridden(industry: IndustryType, version: string): boolean {
+    const config = this.rules.get(industry)?.get(version);
+    return config?.source === 'override';
   }
 
   public getAllRules(industry: IndustryType): RegisteredIndustryConfig[] {

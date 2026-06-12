@@ -21,6 +21,8 @@ import {
   MultiComparisonOptions,
   RuleImpactAnalysisResult,
   RuleImpactAnalysisOptions,
+  RuleReviewView,
+  RuleReviewOptions,
 } from './types';
 
 import { ScoringEngine } from './core/ScoringEngine';
@@ -31,6 +33,7 @@ import { IndustryRuleRegistry } from './core/IndustryRuleRegistry';
 import { ScoringResultComparer } from './core/ScoringResultComparer';
 import { MultiScoringComparer } from './core/MultiScoringComparer';
 import { RuleImpactAnalyzer } from './core/RuleImpactAnalyzer';
+import { RuleReviewService } from './core/RuleReviewService';
 import {
   FieldCompletenessValidator,
   SampleCompletenessValidator,
@@ -65,6 +68,7 @@ export {
   ScoringResultComparer,
   MultiScoringComparer,
   RuleImpactAnalyzer,
+  RuleReviewService,
   FieldCompletenessValidator,
   SampleCompletenessValidator,
   SensitiveFieldRecognizer,
@@ -298,6 +302,21 @@ export class DataQualitySDK {
     return this.reportGenerator.generateAuditDeliveryPackageText(batchResult, {
       ...options,
       passThreshold: options?.passThreshold ?? this.options.auditPassThreshold,
+    });
+  }
+
+  generateRuleReviewView(options?: RuleReviewOptions): RuleReviewView {
+    const reviewService = new RuleReviewService(this.engine);
+    return reviewService.generateReviewView(options);
+  }
+
+  generateRuleReviewViewReport(
+    options?: RuleReviewOptions & { format?: 'text' | 'markdown' }
+  ): string {
+    const reviewService = new RuleReviewService(this.engine);
+    const view = reviewService.generateReviewView(options);
+    return this.reportGenerator.generateRuleReviewViewReport(view, {
+      format: options?.format || 'text',
     });
   }
 
