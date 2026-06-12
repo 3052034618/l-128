@@ -12,12 +12,17 @@ import {
   AuthorizationScope,
   ScoringWeights,
   IndustryType,
+  AuditSummaryReport,
+  ScoringComparisonResult,
+  ComparisonOptions,
 } from './types';
 
 import { ScoringEngine } from './core/ScoringEngine';
 import { BatchScoringService } from './core/BatchScoringService';
 import { ReportGenerator, TextReportOptions, JsonReportOptions } from './core/ReportGenerator';
 import { DetailLogger } from './core/logger';
+import { IndustryRuleRegistry } from './core/IndustryRuleRegistry';
+import { ScoringResultComparer } from './core/ScoringResultComparer';
 import {
   FieldCompletenessValidator,
   SampleCompletenessValidator,
@@ -38,6 +43,9 @@ import {
   safePercentage,
   clampScore,
   LOW_SCORE_THRESHOLD,
+  DEFAULT_AUDIT_PASS_THRESHOLD,
+  DIMENSION_NAMES,
+  getZeroWeightDimensions,
 } from './config';
 
 export {
@@ -45,6 +53,8 @@ export {
   BatchScoringService,
   ReportGenerator,
   DetailLogger,
+  IndustryRuleRegistry,
+  ScoringResultComparer,
   FieldCompletenessValidator,
   SampleCompletenessValidator,
   SensitiveFieldRecognizer,
@@ -62,6 +72,9 @@ export {
   safePercentage,
   clampScore,
   LOW_SCORE_THRESHOLD,
+  DEFAULT_AUDIT_PASS_THRESHOLD,
+  DIMENSION_NAMES,
+  getZeroWeightDimensions,
 };
 
 export type { TextReportOptions, JsonReportOptions };
@@ -70,6 +83,7 @@ export class DataQualitySDK {
   private engine: ScoringEngine;
   private batchService: BatchScoringService;
   private reportGenerator: ReportGenerator;
+  private ruleRegistry: IndustryRuleRegistry;
   private options: SDKOptions;
 
   constructor(options: SDKOptions = {}) {
@@ -81,9 +95,12 @@ export class DataQualitySDK {
       customSensitiveFieldPatterns: options.customSensitiveFieldPatterns,
       customIndustryConfigs: options.customIndustryConfigs,
       autoNormalizeWeights: options.autoNormalizeWeights,
+      handleZeroWeightAs: options.handleZeroWeightAs,
+      auditPassThreshold: options.auditPassThreshold,
     });
     this.batchService = new BatchScoringService(options);
     this.reportGenerator = new ReportGenerator();
+    this.ruleRegistry = IndustryRuleRegistry.getInstance();
   }
 
   score(
@@ -96,6 +113,7 @@ export class DataQualitySDK {
       industry?: IndustryType;
       customWeights?: Partial<ScoringWeights>;
       enableDetailLog?: boolean;
+      industryConfigVersion?: string;
     }
   ): ScoringResult {
     const input: ScoringInput = {
@@ -107,6 +125,7 @@ export class DataQualitySDK {
       industry: params.industry,
       customWeights: params.customWeights,
       enableDetailLog: params.enableDetailLog,
+      industryConfigVersion: params.industryConfigVersion,
     };
     return this.engine.score(input);
   }
@@ -126,12 +145,58 @@ export class DataQualitySDK {
     return this.reportGenerator.generateTextReport(result, options);
   }
 
+  generateMarkdownReport(result: ScoringResult, options?: TextReportOptions): string {
+    return this.reportGenerator.generateMarkdownReport(result, options);
+  }
+
   generateJsonReport(result: ScoringResult, options?: JsonReportOptions): string {
     return this.reportGenerator.generateJsonReport(result, options);
   }
 
-  generateBatchSummaryReport(result: BatchScoringResult): string {
-    return this.reportGenerator.generateBatchSummaryReport(result);
+  generateAuditSummaryReport(result: ScoringResult): AuditSummaryReport {
+    return this.reportGenerator.generateAuditSummaryReport(result, {
+      passThreshold: this.options.auditPassThreshold,
+    });
+  }
+
+  generateAuditSummaryText(
+    result: ScoringResult,
+    format: 'text' | 'markdown' = 'text'
+  ): string {
+    return this.reportGenerator.generateAuditSummaryText(result, {
+      format,
+      passThreshold: this.options.auditPassThreshold,
+    });
+  }
+
+  generateBatchSummaryReport(
+    result: BatchScoringResult,
+    format: 'text' | 'markdown' = 'text'
+  ): string {
+    return this.reportGenerator.generateBatchSummaryReport(result, { format, includeGroups: true });
+  }
+
+  generateComparisonReport(
+    resultA: ScoringResult,
+    resultB: ScoringResult,
+    options?: ComparisonOptions & { format?: 'text' | 'markdown' }
+  ): string {
+    const comparison = ScoringResultComparer.compare(resultA, resultB, options);
+    return this.reportGenerator.generateComparisonReport(comparison, {
+      format: options?.format || 'text',
+    });
+  }
+
+  compareScoringResults(
+    resultA: ScoringResult,
+    resultB: ScoringResult,
+    options?: ComparisonOptions
+  ): ScoringComparisonResult {
+    return ScoringResultComparer.compare(resultA, resultB, options);
+  }
+
+  getRuleRegistry(): IndustryRuleRegistry {
+    return this.ruleRegistry;
   }
 
   getEngine(): ScoringEngine {

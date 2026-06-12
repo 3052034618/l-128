@@ -7,6 +7,7 @@ import {
 } from '../types';
 import { getIndustryConfig, clampScore, safePercentage } from '../config';
 import { DetailLogger } from '../core/logger';
+import { IndustryRuleRegistry } from '../core/IndustryRuleRegistry';
 
 export class FieldCompletenessValidator {
   private logger: DetailLogger;
@@ -22,11 +23,22 @@ export class FieldCompletenessValidator {
 
   validate(
     fields: FieldDefinition[],
-    industry: IndustryType = 'general'
+    industry: IndustryType = 'general',
+    version?: string
   ): { result: FieldCompletenessResult; risks: RiskItem[] } {
-    this.logger.info('FieldCompletenessValidator', `开始校验字段完整性，行业: ${industry}`);
+    this.logger.info('FieldCompletenessValidator', `开始校验字段完整性，行业: ${industry}, 版本: ${version || '默认'}`);
 
-    const industryConfig = getIndustryConfig(industry, this.customIndustryConfigs);
+    let industryConfig = getIndustryConfig(industry, this.customIndustryConfigs);
+    try {
+      const ruleRegistry = IndustryRuleRegistry.getInstance();
+      const registryResult = ruleRegistry.getRuleWithFallbackInfo(industry, version, 'general');
+      industryConfig = {
+        ...registryResult.config,
+        key: registryResult.config.industry,
+      };
+    } catch (e: any) {
+      this.logger.warn('FieldCompletenessValidator', `规则注册中心查询失败，使用默认配置: ${e.message}`);
+    }
     this.logger.debug('FieldCompletenessValidator', `使用行业配置: ${industryConfig.description} (version: ${industryConfig.version || 'unknown'})`);
 
     const fieldNames = fields.map((f) => f.name);

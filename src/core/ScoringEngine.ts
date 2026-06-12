@@ -6,6 +6,9 @@ import {
   RiskItem,
   RiskLevel,
   IndustryRequiredFieldsConfig,
+  RuleFallbackInfo,
+  ZeroWeightDimension,
+  IndustryType,
 } from '../types';
 import {
   DEFAULT_SCORING_WEIGHTS,
@@ -15,8 +18,10 @@ import {
   safePercentage,
   SensitiveFieldPattern,
   getIndustryConfig,
+  DIMENSION_NAMES,
 } from '../config';
 import { DetailLogger } from './logger';
+import { IndustryRuleRegistry } from './IndustryRuleRegistry';
 import { FieldCompletenessValidator } from '../validators/FieldCompletenessValidator';
 import { SampleCompletenessValidator } from '../validators/SampleCompletenessValidator';
 import { SensitiveFieldRecognizer } from '../validators/SensitiveFieldRecognizer';
@@ -31,6 +36,9 @@ export class ScoringEngine {
   private customSensitivePatterns?: SensitiveFieldPattern[];
   private customIndustryConfigs?: Record<string, IndustryRequiredFieldsConfig>;
   private autoNormalizeWeights: boolean;
+  private handleZeroWeightAs: 'exclude' | 'normalize' | 'warn';
+  private defaultVersion?: string;
+  private ruleRegistry: IndustryRuleRegistry;
 
   constructor(options?: {
     defaultWeights?: Partial<ScoringWeights>;
@@ -39,6 +47,9 @@ export class ScoringEngine {
     customSensitiveFieldPatterns?: SensitiveFieldPattern[];
     customIndustryConfigs?: Record<string, IndustryRequiredFieldsConfig>;
     autoNormalizeWeights?: boolean;
+    handleZeroWeightAs?: 'exclude' | 'normalize' | 'warn';
+    defaultIndustryConfigVersion?: string;
+    auditPassThreshold?: number;
   }) {
     this.logger = new DetailLogger(options?.enableDetailLogByDefault ?? false);
     this.defaultWeights = {
@@ -49,6 +60,21 @@ export class ScoringEngine {
     this.customSensitivePatterns = options?.customSensitiveFieldPatterns;
     this.customIndustryConfigs = options?.customIndustryConfigs;
     this.autoNormalizeWeights = options?.autoNormalizeWeights ?? true;
+    this.handleZeroWeightAs = options?.handleZeroWeightAs ?? 'warn';
+    this.defaultVersion = options?.defaultIndustryConfigVersion;
+    this.ruleRegistry = IndustryRuleRegistry.getInstance();
+
+    if (this.customIndustryConfigs) {
+      for (const [industry, config] of Object.entries(this.customIndustryConfigs)) {
+        const version = config.version || 'custom';
+        if (!this.ruleRegistry.hasRule(industry, version)) {
+          this.ruleRegistry.registerRule(industry, version, config, {
+            source: 'override',
+            setAsDefault: !this.ruleRegistry.getDefaultVersion(industry),
+          });
+        }
+      }
+    }
   }
 
   score(input: ScoringInput): ScoringResult {
@@ -62,9 +88,11 @@ export class ScoringEngine {
     const weightValidation = validateAndNormalizeWeights(
       rawCustomWeights,
       this.defaultWeights,
-      this.autoNormalizeWeights
+      this.autoNormalizeWeights,
+      this.handleZeroWeightAs
     );
     const weights = weightValidation.normalizedWeights;
+    const zeroWeightDimensions: ZeroWeightDimension[] = weightValidation.zeroWeightDimensions || [];
 
     if (weightValidation.warnings.length > 0) {
       for (const warning of weightValidation.warnings) {
@@ -72,16 +100,41 @@ export class ScoringEngine {
       }
     }
 
-    const industry = input.industry || this.defaultIndustry || 'general';
-    const industryConfig = getIndustryConfig(industry, this.customIndustryConfigs);
+    const industry = (input.industry || this.defaultIndustry || 'general') as IndustryType;
+    const requestedVersion = input.industryConfigVersion || this.defaultVersion;
+
+    let ruleFallbackInfo: RuleFallbackInfo | undefined;
+    let industryConfig = getIndustryConfig(industry, this.customIndustryConfigs);
+
+    try {
+      const registryResult = this.ruleRegistry.getRuleWithFallbackInfo(
+        industry,
+        requestedVersion,
+        'general' as IndustryType
+      );
+      industryConfig = {
+        ...registryResult.config,
+        key: registryResult.config.industry,
+      };
+      ruleFallbackInfo = registryResult.fallbackInfo;
+      if (ruleFallbackInfo) {
+        this.logger.warn('ScoringEngine', `规则回退: ${ruleFallbackInfo.reason}`);
+      }
+    } catch (e: any) {
+      this.logger.warn('ScoringEngine', `规则注册中心查询失败，使用 fallback: ${e.message}`);
+    }
 
     this.logger.debug('ScoringEngine', '评分配置', {
       industry,
+      requestedVersion,
       industryConfig: industryConfig.description,
       industryConfigVersion: industryConfig.version,
+      industryConfigSource: industryConfig.source,
+      fallbackReason: ruleFallbackInfo?.reason,
       originalWeights: { ...this.defaultWeights, ...rawCustomWeights },
       normalizedWeights: weights,
       weightsNormalized: weightValidation.wasNormalized,
+      zeroWeightDimensions: zeroWeightDimensions.map((z) => `${z.dimensionName}=0, strategy=${z.handlingStrategy}`),
     });
 
     const fieldValidator = new FieldCompletenessValidator(this.logger, this.customIndustryConfigs);
@@ -91,7 +144,7 @@ export class ScoringEngine {
     const descriptionValidator = new DescriptionCompletenessValidator(this.logger);
     const authValidator = new AuthorizationValidator(this.logger);
 
-    const fieldResult = fieldValidator.validate(input.fields, industry);
+    const fieldResult = fieldValidator.validate(input.fields, industry, requestedVersion);
     const sampleResult = sampleValidator.validate(input.sample);
     const sensitiveResult = sensitiveRecognizer.recognize(input.fields, input.authorization);
     const updateResult = updateFrequencyScorer.score(input.description);
@@ -106,6 +159,52 @@ export class ScoringEngine {
       ...descriptionResult.risks,
       ...authResult.risks,
     ];
+
+    if (ruleFallbackInfo) {
+      allRisks.push({
+        id: 'rule-fallback-warning',
+        category: 'rule_config',
+        level: 'low',
+        message: `行业规则发生回退: ${ruleFallbackInfo.reason}`,
+        suggestion: '建议检查行业配置和版本号是否正确，或在规则注册中心补充对应的规则版本',
+        evidence: [
+          {
+            type: 'config',
+            description: '请求的规则参数',
+            value: `行业=${ruleFallbackInfo.requestedIndustry || industry}, 版本=${ruleFallbackInfo.requestedVersion || '默认'}`,
+          },
+          {
+            type: 'config',
+            description: '实际使用的规则',
+            value: `行业=${ruleFallbackInfo.fallbackIndustry}, 版本=${ruleFallbackInfo.fallbackVersion}`,
+          },
+          {
+            type: 'value',
+            description: '回退原因',
+            value: ruleFallbackInfo.reason,
+          },
+        ],
+      });
+    }
+
+    if (zeroWeightDimensions.length > 0) {
+      const explicitZeros = zeroWeightDimensions.filter((z) => z.isExplicitlyZero);
+      if (explicitZeros.length > 0) {
+        allRisks.push({
+          id: 'zero-weight-warning',
+          category: 'weight_config',
+          level: 'low',
+          message: `有 ${explicitZeros.length} 个维度权重被显式设为 0，这些维度不影响总分`,
+          suggestion: '请确认是否有意将这些维度排除在评分之外，如需参与评分请设置正数值权重',
+          evidence: explicitZeros.map((z, idx) => ({
+            type: 'weight' as const,
+            description: `零权重维度 #${idx + 1}`,
+            value: `${z.dimensionName} (${z.dimensionKey})`,
+            expected: z.note,
+          })),
+        });
+      }
+    }
 
     if (weightValidation.warnings.length > 0) {
       allRisks.push({
@@ -134,20 +233,20 @@ export class ScoringEngine {
     ];
 
     let rawTotalScore = 0;
+    let effectiveWeightSum = 0;
     for (const dim of dimScores) {
       const safeDimScore = isFinite(dim.score) && !isNaN(dim.score) ? dim.score : 0;
       const safeWeight = isFinite(weights[dim.key]) && !isNaN(weights[dim.key]) ? weights[dim.key] : 0;
-      rawTotalScore += (safeDimScore / 100) * safeWeight;
+      const isZeroWeight = zeroWeightDimensions.some(
+        (z) => z.dimensionKey === dim.key && z.handlingStrategy === 'exclude'
+      );
+      if (!isZeroWeight) {
+        rawTotalScore += (safeDimScore / 100) * safeWeight;
+        effectiveWeightSum += safeWeight;
+      }
     }
 
-    const totalWeight =
-      weights.fieldCompleteness +
-      weights.sampleCompleteness +
-      weights.sensitiveField +
-      weights.updateFrequency +
-      weights.descriptionCompleteness +
-      weights.authorization;
-
+    const totalWeight = effectiveWeightSum > 0 ? effectiveWeightSum : 100;
     const safeTotalWeight = isFinite(totalWeight) && !isNaN(totalWeight) && totalWeight > 0 ? totalWeight : 100;
     const totalScore = clampScore(rawTotalScore, 0, safeTotalWeight);
     const normalizedTotalWeight = clampScore(safeTotalWeight, 1, 1000);
@@ -180,16 +279,20 @@ export class ScoringEngine {
       suggestions,
       detailLogs: enableDetailLog ? this.logger.getLogs() : undefined,
       weightWarnings: weightValidation.warnings.length > 0 ? weightValidation.warnings : undefined,
+      zeroWeightDimensions: zeroWeightDimensions.length > 0 ? zeroWeightDimensions : undefined,
+      ruleFallbackInfo,
       metadata: {
         scoredAt: new Date().toISOString(),
         industry,
         weights,
-        originalWeights: weightValidation.wasNormalized
+        originalWeights: weightValidation.wasNormalized || zeroWeightDimensions.length > 0
           ? { ...this.defaultWeights, ...rawCustomWeights }
           : undefined,
         weightsNormalized: weightValidation.wasNormalized,
         industryConfigVersion: industryConfig.version,
         industryConfigDescription: industryConfig.description,
+        industryConfigSource: industryConfig.source || 'built-in',
+        ruleFallbackReason: ruleFallbackInfo?.reason,
       },
     };
 

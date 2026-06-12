@@ -8,10 +8,13 @@ import {
   ScoringWeights,
   RiskLevel,
   SDKOptions,
+  BatchGroupSummary,
+  RiskItem,
+  IndustryType,
 } from '../types';
 import { ScoringEngine } from './ScoringEngine';
 import { DetailLogger } from './logger';
-import { LOW_SCORE_THRESHOLD, safePercentage } from '../config';
+import { LOW_SCORE_THRESHOLD, safePercentage, DIMENSION_NAMES } from '../config';
 
 interface RiskAccumulator {
   id: string;
@@ -20,6 +23,12 @@ interface RiskAccumulator {
   category: string;
   count: number;
   products: string[];
+}
+
+interface GroupAccumulator {
+  groupKey: string;
+  groupName: string;
+  results: ScoringResult[];
 }
 
 export class BatchScoringService {
@@ -34,6 +43,8 @@ export class BatchScoringService {
       customSensitiveFieldPatterns: options?.customSensitiveFieldPatterns,
       customIndustryConfigs: options?.customIndustryConfigs,
       autoNormalizeWeights: options?.autoNormalizeWeights,
+      handleZeroWeightAs: options?.handleZeroWeightAs,
+      auditPassThreshold: options?.auditPassThreshold,
     });
     this.logger = new DetailLogger(options?.enableDetailLogByDefault ?? false);
   }
@@ -83,6 +94,9 @@ export class BatchScoringService {
     const averageScore = results.length > 0 ? totalScore / results.length : 0;
     const highFrequencyRisks = this.aggregateHighFrequencyRisks(results);
     const lowScoringDimensions = this.aggregateLowScoringDimensions(results);
+    const groupByIndustry = this.generateGroupByIndustry(results);
+    const groupByGrade = this.generateGroupByGrade(results);
+    const groupByCategory = this.generateGroupByCategory(results);
 
     this.logger.info('BatchScoringService', `批量评分完成，成功评分 ${results.length} 个产品`);
 
@@ -94,6 +108,9 @@ export class BatchScoringService {
         averageScore,
         highFrequencyRisks,
         lowScoringDimensions,
+        groupByIndustry,
+        groupByGrade,
+        groupByCategory,
       },
     };
   }
@@ -122,6 +139,9 @@ export class BatchScoringService {
         const averageScore = results.length > 0 ? totalScore / results.length : 0;
         const highFrequencyRisks = this.aggregateHighFrequencyRisks(results);
         const lowScoringDimensions = this.aggregateLowScoringDimensions(results);
+        const groupByIndustry = this.generateGroupByIndustry(results);
+        const groupByGrade = this.generateGroupByGrade(results);
+        const groupByCategory = this.generateGroupByCategory(results);
 
         resolve({
           results,
@@ -131,6 +151,9 @@ export class BatchScoringService {
             averageScore,
             highFrequencyRisks,
             lowScoringDimensions,
+            groupByIndustry,
+            groupByGrade,
+            groupByCategory,
           },
         });
       };
@@ -177,7 +200,7 @@ export class BatchScoringService {
 
   private aggregateHighFrequencyRisks(results: ScoringResult[]): HighFrequencyRisk[] {
     const riskMap = new Map<string, RiskAccumulator>();
-    const minOccurrence = Math.max(2, Math.floor(results.length * 0.2));
+    const totalItems = results.length;
 
     for (const result of results) {
       for (const risk of result.risks) {
@@ -204,7 +227,7 @@ export class BatchScoringService {
     const levelOrder: Record<RiskLevel, number> = { critical: 0, high: 1, medium: 2, low: 3 };
 
     return Array.from(riskMap.values())
-      .filter((r) => r.count >= minOccurrence)
+      .filter((r) => r.count >= 1)
       .sort((a, b) => {
         if (levelOrder[a.level] !== levelOrder[b.level]) {
           return levelOrder[a.level] - levelOrder[b.level];
@@ -218,6 +241,7 @@ export class BatchScoringService {
         level: r.level,
         category: r.category,
         occurrenceCount: r.count,
+        occurrencePercentage: totalItems > 0 ? Math.round((r.count / totalItems) * 10000) / 100 : 0,
         affectedProducts: r.products,
       }));
   }
@@ -266,5 +290,124 @@ export class BatchScoringService {
     }
 
     return lowDimensions.sort((a, b) => a.averageScore - b.averageScore);
+  }
+
+  private buildGroupSummary(
+    groupKey: string,
+    groupName: string,
+    results: ScoringResult[]
+  ): BatchGroupSummary {
+    const gradeDistribution: Record<QualityGrade, number> = { S: 0, A: 0, B: 0, C: 0, D: 0 };
+    let totalScore = 0;
+
+    for (const result of results) {
+      gradeDistribution[result.grade]++;
+      totalScore += safePercentage(result.totalScore, result.maxScore) / 100;
+    }
+
+    const averageScore = results.length > 0 ? totalScore / results.length : 0;
+    const highFrequencyRisks = this.aggregateHighFrequencyRisks(results);
+    const lowScoringDimensions = this.aggregateLowScoringDimensions(results);
+
+    return {
+      groupKey,
+      groupName,
+      totalItems: results.length,
+      averageScore: Math.round(averageScore * 10000) / 100,
+      gradeDistribution,
+      highFrequencyRisks,
+      lowScoringDimensions,
+      productIds: results.map((r) => r.productId),
+    };
+  }
+
+  private generateGroupByIndustry(results: ScoringResult[]): BatchGroupSummary[] {
+    const industryMap = new Map<string, ScoringResult[]>();
+
+    for (const result of results) {
+      const industry = result.metadata.industry || 'unknown';
+      if (!industryMap.has(industry)) {
+        industryMap.set(industry, []);
+      }
+      industryMap.get(industry)!.push(result);
+    }
+
+    const industryNames: Record<string, string> = {
+      finance: '金融',
+      healthcare: '医疗',
+      education: '教育',
+      retail: '零售',
+      transportation: '交通',
+      government: '政务',
+      manufacturing: '制造',
+      general: '通用',
+      unknown: '未知',
+    };
+
+    return Array.from(industryMap.entries())
+      .map(([industry, items]) =>
+        this.buildGroupSummary(industry, industryNames[industry] || industry, items)
+      )
+      .sort((a, b) => b.totalItems - a.totalItems);
+  }
+
+  private generateGroupByGrade(results: ScoringResult[]): BatchGroupSummary[] {
+    const gradeMap = new Map<QualityGrade, ScoringResult[]>();
+
+    for (const result of results) {
+      if (!gradeMap.has(result.grade)) {
+        gradeMap.set(result.grade, []);
+      }
+      gradeMap.get(result.grade)!.push(result);
+    }
+
+    const gradeNames: Record<QualityGrade, string> = {
+      S: 'S级 - 优秀',
+      A: 'A级 - 良好',
+      B: 'B级 - 合格',
+      C: 'C级 - 待改进',
+      D: 'D级 - 不合格',
+    };
+
+    const gradeOrder: QualityGrade[] = ['S', 'A', 'B', 'C', 'D'];
+
+    return gradeOrder
+      .filter((grade) => gradeMap.has(grade))
+      .map((grade) => this.buildGroupSummary(grade, gradeNames[grade], gradeMap.get(grade)!));
+  }
+
+  private generateGroupByCategory(results: ScoringResult[]): BatchGroupSummary[] {
+    const categoryMap = new Map<string, ScoringResult[]>();
+
+    for (const result of results) {
+      const categories = new Set(result.risks.map((r) => r.category));
+      if (categories.size === 0) {
+        categories.add('无风险');
+      }
+      for (const category of categories) {
+        if (!categoryMap.has(category)) {
+          categoryMap.set(category, []);
+        }
+        if (!categoryMap.get(category)!.some((r) => r.productId === result.productId)) {
+          categoryMap.get(category)!.push(result);
+        }
+      }
+    }
+
+    const categoryNames: Record<string, string> = {
+      '字段完整性': '字段完整性风险',
+      '样本完整性': '样本完整性风险',
+      '敏感字段': '敏感字段风险',
+      '更新频率': '更新频率风险',
+      '描述完整性': '描述完整性风险',
+      '授权范围': '授权范围风险',
+      '无风险': '无风险项',
+    };
+
+    return Array.from(categoryMap.entries())
+      .map(([category, items]) =>
+        this.buildGroupSummary(category, categoryNames[category] || category, items)
+      )
+      .sort((a, b) => b.totalItems - a.totalItems);
   }
 }

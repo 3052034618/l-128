@@ -208,6 +208,57 @@ export interface DetailLogEntry {
   data?: any;
 }
 
+export interface LowScoringDimension {
+  dimension: string;
+  dimensionKey: keyof ScoringWeights;
+  averageScore: number;
+  belowThresholdCount: number;
+  affectedProducts: string[];
+}
+
+export interface IndustryRequiredFieldsConfig {
+  version?: string;
+  required: string[];
+  recommended: string[];
+  description: string;
+  isDefault?: boolean;
+  effectiveAt?: string;
+  deprecatedAt?: string;
+  source?: 'built-in' | 'custom' | 'override';
+}
+
+export interface RegisteredIndustryConfig extends IndustryRequiredFieldsConfig {
+  version: string;
+  industry: string;
+  registeredAt: string;
+  isDefault: boolean;
+  source: 'built-in' | 'custom' | 'override';
+}
+
+export interface RuleQueryResult {
+  config: RegisteredIndustryConfig;
+  isDefault: boolean;
+  isLatest: boolean;
+  fallbackReason?: string;
+  availableVersions: string[];
+}
+
+export interface RuleFallbackInfo {
+  requestedIndustry?: string;
+  requestedVersion?: string;
+  fallbackIndustry: string;
+  fallbackVersion: string;
+  reason: string;
+}
+
+export interface ZeroWeightDimension {
+  dimensionKey: keyof ScoringWeights;
+  dimensionName: string;
+  isExplicitlyZero: boolean;
+  handlingStrategy: 'exclude' | 'normalize';
+  note: string;
+}
+
 export interface ScoringResult {
   productId: string;
   totalScore: number;
@@ -225,6 +276,8 @@ export interface ScoringResult {
   suggestions: string[];
   detailLogs?: DetailLogEntry[];
   weightWarnings?: string[];
+  zeroWeightDimensions?: ZeroWeightDimension[];
+  ruleFallbackInfo?: RuleFallbackInfo;
   metadata: {
     scoredAt: string;
     industry: IndustryType;
@@ -233,6 +286,8 @@ export interface ScoringResult {
     weightsNormalized: boolean;
     industryConfigVersion?: string;
     industryConfigDescription?: string;
+    industryConfigSource?: 'built-in' | 'custom' | 'override';
+    ruleFallbackReason?: string;
   };
 }
 
@@ -242,15 +297,19 @@ export interface HighFrequencyRisk {
   level: RiskLevel;
   category: string;
   occurrenceCount: number;
+  occurrencePercentage: number;
   affectedProducts: string[];
 }
 
-export interface LowScoringDimension {
-  dimension: string;
-  dimensionKey: keyof ScoringWeights;
+export interface BatchGroupSummary {
+  groupKey: string;
+  groupName: string;
+  totalItems: number;
   averageScore: number;
-  belowThresholdCount: number;
-  affectedProducts: string[];
+  gradeDistribution: Record<QualityGrade, number>;
+  highFrequencyRisks: HighFrequencyRisk[];
+  lowScoringDimensions: LowScoringDimension[];
+  productIds: string[];
 }
 
 export interface BatchScoringResult {
@@ -261,14 +320,95 @@ export interface BatchScoringResult {
     averageScore: number;
     highFrequencyRisks: HighFrequencyRisk[];
     lowScoringDimensions: LowScoringDimension[];
+    groupByIndustry?: BatchGroupSummary[];
+    groupByGrade?: BatchGroupSummary[];
+    groupByCategory?: BatchGroupSummary[];
   };
 }
 
-export interface IndustryRequiredFieldsConfig {
-  version?: string;
-  required: string[];
-  recommended: string[];
-  description: string;
+export interface AuditSummaryReport {
+  productId: string;
+  productName?: string;
+  scoredAt: string;
+  overallResult: 'PASS' | 'FAIL' | 'WARNING';
+  totalScore: number;
+  maxScore: number;
+  grade: QualityGrade;
+  passThreshold: number;
+  criticalFailures: RiskItem[];
+  highPriorityRisks: RiskItem[];
+  mediumPriorityRisks: RiskItem[];
+  keyEvidence: {
+    description: string;
+    evidence: RiskEvidence[];
+  }[];
+  rectificationPlan: {
+    priority: 'critical' | 'high' | 'medium' | 'low';
+    action: string;
+    relatedRisks: string[];
+    expectedImpact: string;
+  }[];
+  ruleInfo: {
+    industry: string;
+    version: string;
+    description: string;
+    source: string;
+    fallbackInfo?: RuleFallbackInfo;
+  };
+}
+
+export interface ScoreComparisonDelta {
+  dimension: string;
+  dimensionKey: keyof ScoringWeights;
+  scoreA: number;
+  scoreB: number;
+  scoreDiff: number;
+  maxScore: number;
+}
+
+export interface RiskComparisonDelta {
+  riskId: string;
+  category: string;
+  message: string;
+  inA: boolean;
+  inB: boolean;
+  levelA?: RiskLevel;
+  levelB?: RiskLevel;
+  levelChange?: 'up' | 'down' | 'same';
+}
+
+export interface ScoringComparisonResult {
+  productId: string;
+  labelA: string;
+  labelB: string;
+  totalScoreA: number;
+  totalScoreB: number;
+  totalScoreDiff: number;
+  gradeA: QualityGrade;
+  gradeB: QualityGrade;
+  gradeChanged: boolean;
+  dimensionDeltas: ScoreComparisonDelta[];
+  improvedDimensions: ScoreComparisonDelta[];
+  worsenedDimensions: ScoreComparisonDelta[];
+  unchangedDimensions: ScoreComparisonDelta[];
+  riskDeltas: RiskComparisonDelta[];
+  newRisks: RiskComparisonDelta[];
+  resolvedRisks: RiskComparisonDelta[];
+  levelIncreasedRisks: RiskComparisonDelta[];
+  levelDecreasedRisks: RiskComparisonDelta[];
+  lowScoringDimensionsA: LowScoringDimension[];
+  lowScoringDimensionsB: LowScoringDimension[];
+  weightsA: ScoringWeights;
+  weightsB: ScoringWeights;
+  ruleInfoA: { industry: string; version: string; description: string };
+  ruleInfoB: { industry: string; version: string; description: string };
+  scoredAt: string;
+}
+
+export interface ComparisonOptions {
+  labelA?: string;
+  labelB?: string;
+  lowScoreThreshold?: number;
 }
 
 export interface SDKOptions {
@@ -276,6 +416,7 @@ export interface SDKOptions {
   defaultWeights?: Partial<ScoringWeights>;
   enableDetailLogByDefault?: boolean;
   autoNormalizeWeights?: boolean;
+  handleZeroWeightAs?: 'exclude' | 'normalize' | 'warn';
   customIndustryConfigs?: Record<string, IndustryRequiredFieldsConfig>;
   customSensitiveFieldPatterns?: Array<{
     pattern: RegExp;
@@ -284,4 +425,5 @@ export interface SDKOptions {
     description: string;
   }>;
   defaultIndustryConfigVersion?: string;
+  auditPassThreshold?: number;
 }

@@ -7,7 +7,19 @@ import {
   DataSensitivityLevel,
   DataProductDescription,
   WeightValidationResult,
+  ZeroWeightDimension,
 } from '../types';
+
+export const DEFAULT_AUDIT_PASS_THRESHOLD = 70;
+
+export const DIMENSION_NAMES: Record<keyof ScoringWeights, string> = {
+  fieldCompleteness: '字段完整性',
+  sampleCompleteness: '样本完整性',
+  sensitiveField: '敏感字段',
+  updateFrequency: '更新频率',
+  descriptionCompleteness: '描述完整性',
+  authorization: '授权范围',
+};
 
 export const DEFAULT_SCORING_WEIGHTS: ScoringWeights = {
   fieldCompleteness: 25,
@@ -265,9 +277,11 @@ export const LOW_SCORE_THRESHOLD = 60;
 export function validateAndNormalizeWeights(
   customWeights: Partial<ScoringWeights>,
   baseWeights: ScoringWeights = DEFAULT_SCORING_WEIGHTS,
-  autoNormalize: boolean = true
-): WeightValidationResult {
+  autoNormalize: boolean = true,
+  handleZeroWeightAs: 'exclude' | 'normalize' | 'warn' = 'warn'
+): WeightValidationResult & { zeroWeightDimensions: ZeroWeightDimension[] } {
   const warnings: string[] = [];
+  const zeroWeightDimensions: ZeroWeightDimension[] = [];
   const mergedWeights: ScoringWeights = {
     fieldCompleteness: customWeights.fieldCompleteness ?? baseWeights.fieldCompleteness,
     sampleCompleteness: customWeights.sampleCompleteness ?? baseWeights.sampleCompleteness,
@@ -282,6 +296,8 @@ export function validateAndNormalizeWeights(
 
   for (const key of Object.keys(mergedWeights) as (keyof ScoringWeights)[]) {
     const value = mergedWeights[key];
+    const name = DIMENSION_NAMES[key];
+
     if (typeof value !== 'number' || isNaN(value)) {
       warnings.push(`权重 ${key} 不是有效数字 (${value})，已使用默认值 ${baseWeights[key]}`);
       mergedWeights[key] = baseWeights[key];
@@ -291,31 +307,103 @@ export function validateAndNormalizeWeights(
       mergedWeights[key] = 0;
       wasNormalized = true;
     }
+
+    if (mergedWeights[key] === 0) {
+      const isExplicit = customWeights[key] === 0 || (customWeights[key] as any) < 0;
+      let note = '';
+      if (handleZeroWeightAs === 'exclude') {
+        note = `该维度权重为 0，将不计入总分计算，也不参与归一化`;
+        warnings.push(`维度 ${name} (${key}) 权重为 0，将不计入总分，不参与归一化`);
+      } else if (handleZeroWeightAs === 'normalize') {
+        note = `该维度权重为 0，将参与归一化计算，归一化后可能仍为 0`;
+        if (isExplicit) {
+          warnings.push(`维度 ${name} (${key}) 权重被显式设为 0，将参与归一化计算`);
+        }
+      } else {
+        note = `该维度权重为 0，归一化后仍为 0，该维度评分不影响总分`;
+        if (isExplicit) {
+          warnings.push(`维度 ${name} (${key}) 权重被显式设为 0，该维度评分将不影响总分`);
+        }
+      }
+      zeroWeightDimensions.push({
+        dimensionKey: key,
+        dimensionName: name,
+        isExplicitlyZero: isExplicit,
+        handlingStrategy: handleZeroWeightAs === 'warn' ? 'normalize' : handleZeroWeightAs,
+        note,
+      });
+    }
   }
 
   const originalSum = Object.values(originalWeights).reduce((s, v) => s + (isNaN(v) ? 0 : v), 0);
-  const currentSum = Object.values(mergedWeights).reduce((s, v) => s + v, 0);
+  let currentSum = Object.values(mergedWeights).reduce((s, v) => s + v, 0);
 
-  if (currentSum <= 0) {
-    warnings.push(`所有权重总和为 0，已回退至默认权重配置`);
-    Object.assign(mergedWeights, DEFAULT_SCORING_WEIGHTS);
-    wasNormalized = true;
-  } else if (autoNormalize && Math.abs(currentSum - DEFAULT_WEIGHT_SUM) > 0.001) {
-    const scale = DEFAULT_WEIGHT_SUM / currentSum;
-    for (const key of Object.keys(mergedWeights) as (keyof ScoringWeights)[]) {
-      mergedWeights[key] = Math.round(mergedWeights[key] * scale * 100) / 100;
+  let normalizedWeights = { ...mergedWeights };
+  if (handleZeroWeightAs === 'exclude') {
+    const nonZeroKeys = (Object.keys(mergedWeights) as (keyof ScoringWeights)[]).filter(
+      (k) => mergedWeights[k] > 0
+    );
+    if (nonZeroKeys.length === 0) {
+      warnings.push(`所有权重均为 0，已回退至默认权重配置`);
+      Object.assign(normalizedWeights, DEFAULT_SCORING_WEIGHTS);
+      wasNormalized = true;
+    } else {
+      const nonZeroSum = nonZeroKeys.reduce((s, k) => s + mergedWeights[k], 0);
+      if (autoNormalize && Math.abs(nonZeroSum - DEFAULT_WEIGHT_SUM) > 0.001) {
+        const scale = DEFAULT_WEIGHT_SUM / nonZeroSum;
+        for (const key of nonZeroKeys) {
+          normalizedWeights[key] = Math.round(mergedWeights[key] * scale * 100) / 100;
+        }
+        warnings.push(`所有权重非零总和 (${nonZeroSum}) 不等于 100，已自动按比例归一化（零权重维度保持 0）`);
+        wasNormalized = true;
+      }
     }
-    warnings.push(`权重总和 (${originalSum}) 不等于 100，已自动按比例归一化`);
-    wasNormalized = true;
+  } else {
+    if (currentSum <= 0) {
+      warnings.push(`所有权重总和为 0，已回退至默认权重配置`);
+      Object.assign(normalizedWeights, DEFAULT_SCORING_WEIGHTS);
+      wasNormalized = true;
+    } else if (autoNormalize && Math.abs(currentSum - DEFAULT_WEIGHT_SUM) > 0.001) {
+      const scale = DEFAULT_WEIGHT_SUM / currentSum;
+      for (const key of Object.keys(normalizedWeights) as (keyof ScoringWeights)[]) {
+        normalizedWeights[key] = Math.round(normalizedWeights[key] * scale * 100) / 100;
+      }
+      warnings.push(`权重总和 (${originalSum}) 不等于 100，已自动按比例归一化`);
+      wasNormalized = true;
+    }
   }
 
   return {
     isValid: warnings.length === 0,
-    normalizedWeights: mergedWeights,
+    normalizedWeights,
     warnings,
     wasNormalized,
     originalSum,
+    zeroWeightDimensions,
   };
+}
+
+export function getZeroWeightDimensions(
+  weights: ScoringWeights,
+  originalWeights: Partial<ScoringWeights>,
+  strategy: 'exclude' | 'normalize' | 'warn' = 'warn'
+): ZeroWeightDimension[] {
+  const result: ZeroWeightDimension[] = [];
+  for (const key of Object.keys(weights) as (keyof ScoringWeights)[]) {
+    if (weights[key] === 0) {
+      const isExplicit = originalWeights[key] === 0 || (originalWeights[key] as any) < 0;
+      result.push({
+        dimensionKey: key,
+        dimensionName: DIMENSION_NAMES[key],
+        isExplicitlyZero: isExplicit,
+        handlingStrategy: strategy === 'warn' ? 'normalize' : strategy,
+        note: isExplicit
+          ? `权重被显式设为 0，${strategy === 'exclude' ? '不计入总分' : '归一化后仍为 0，不影响总分'}`
+          : `权重经修正后为 0，不影响总分`,
+      });
+    }
+  }
+  return result;
 }
 
 export function safePercentage(value: number, total: number, decimals: number = 2): number {
