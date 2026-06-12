@@ -38,6 +38,8 @@ export class ScoringEngine {
   private autoNormalizeWeights: boolean;
   private handleZeroWeightAs: 'exclude' | 'normalize' | 'warn';
   private defaultVersion?: string;
+  private usePublishedRulesOnly: boolean;
+  private allowTrialRules: boolean;
   private ruleRegistry: IndustryRuleRegistry;
 
   constructor(options?: {
@@ -50,6 +52,8 @@ export class ScoringEngine {
     handleZeroWeightAs?: 'exclude' | 'normalize' | 'warn';
     defaultIndustryConfigVersion?: string;
     auditPassThreshold?: number;
+    usePublishedRulesOnly?: boolean;
+    allowTrialRules?: boolean;
   }) {
     this.logger = new DetailLogger(options?.enableDetailLogByDefault ?? false);
     this.defaultWeights = {
@@ -62,6 +66,8 @@ export class ScoringEngine {
     this.autoNormalizeWeights = options?.autoNormalizeWeights ?? true;
     this.handleZeroWeightAs = options?.handleZeroWeightAs ?? 'warn';
     this.defaultVersion = options?.defaultIndustryConfigVersion;
+    this.usePublishedRulesOnly = options?.usePublishedRulesOnly ?? true;
+    this.allowTrialRules = options?.allowTrialRules ?? false;
     this.ruleRegistry = IndustryRuleRegistry.getInstance();
 
     if (this.customIndustryConfigs) {
@@ -110,7 +116,12 @@ export class ScoringEngine {
       const registryResult = this.ruleRegistry.getRuleWithFallbackInfo(
         industry,
         requestedVersion,
-        'general' as IndustryType
+        {
+          defaultIndustry: 'general' as IndustryType,
+          allowTrial: this.allowTrialRules,
+          allowDeprecated: false,
+          allowDraft: false,
+        }
       );
       industryConfig = {
         ...registryResult.config,
@@ -144,7 +155,11 @@ export class ScoringEngine {
     const descriptionValidator = new DescriptionCompletenessValidator(this.logger);
     const authValidator = new AuthorizationValidator(this.logger);
 
-    const fieldResult = fieldValidator.validate(input.fields, industry, requestedVersion);
+    const fieldResult = fieldValidator.validate(input.fields, industry, requestedVersion, {
+      allowTrial: this.allowTrialRules,
+      allowDraft: false,
+      allowDeprecated: false,
+    });
     const sampleResult = sampleValidator.validate(input.sample);
     const sensitiveResult = sensitiveRecognizer.recognize(input.fields, input.authorization);
     const updateResult = updateFrequencyScorer.score(input.description);
@@ -292,6 +307,8 @@ export class ScoringEngine {
         industryConfigVersion: industryConfig.version,
         industryConfigDescription: industryConfig.description,
         industryConfigSource: industryConfig.source || 'built-in',
+        industryConfigStatus: (industryConfig as any).status,
+        industryConfigEffectiveAt: (industryConfig as any).publishedAt || (industryConfig as any).effectiveAt,
         ruleFallbackReason: ruleFallbackInfo?.reason,
       },
     };

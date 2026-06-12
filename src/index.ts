@@ -12,9 +12,15 @@ import {
   AuthorizationScope,
   ScoringWeights,
   IndustryType,
+  IndustryRequiredFieldsConfig,
   AuditSummaryReport,
   ScoringComparisonResult,
   ComparisonOptions,
+  AuditDeliveryPackage,
+  MultiScoringComparisonResult,
+  MultiComparisonOptions,
+  RuleImpactAnalysisResult,
+  RuleImpactAnalysisOptions,
 } from './types';
 
 import { ScoringEngine } from './core/ScoringEngine';
@@ -23,6 +29,8 @@ import { ReportGenerator, TextReportOptions, JsonReportOptions } from './core/Re
 import { DetailLogger } from './core/logger';
 import { IndustryRuleRegistry } from './core/IndustryRuleRegistry';
 import { ScoringResultComparer } from './core/ScoringResultComparer';
+import { MultiScoringComparer } from './core/MultiScoringComparer';
+import { RuleImpactAnalyzer } from './core/RuleImpactAnalyzer';
 import {
   FieldCompletenessValidator,
   SampleCompletenessValidator,
@@ -55,6 +63,8 @@ export {
   DetailLogger,
   IndustryRuleRegistry,
   ScoringResultComparer,
+  MultiScoringComparer,
+  RuleImpactAnalyzer,
   FieldCompletenessValidator,
   SampleCompletenessValidator,
   SensitiveFieldRecognizer,
@@ -97,6 +107,8 @@ export class DataQualitySDK {
       autoNormalizeWeights: options.autoNormalizeWeights,
       handleZeroWeightAs: options.handleZeroWeightAs,
       auditPassThreshold: options.auditPassThreshold,
+      usePublishedRulesOnly: options.usePublishedRulesOnly,
+      allowTrialRules: options.allowTrialRules,
     });
     this.batchService = new BatchScoringService(options);
     this.reportGenerator = new ReportGenerator();
@@ -209,6 +221,92 @@ export class DataQualitySDK {
 
   getDefaultWeights(): ScoringWeights {
     return { ...DEFAULT_SCORING_WEIGHTS, ...(this.options.defaultWeights || {}) };
+  }
+
+  compareMultiScoringResults(
+    results: ScoringResult[],
+    options?: MultiComparisonOptions
+  ): MultiScoringComparisonResult {
+    return MultiScoringComparer.compare(results, options);
+  }
+
+  generateMultiComparisonReport(
+    results: ScoringResult[],
+    options?: MultiComparisonOptions & { format?: 'text' | 'markdown' }
+  ): string {
+    const comparison = MultiScoringComparer.compare(results, options);
+    return this.reportGenerator.generateMultiComparisonReport(comparison, {
+      format: options?.format || 'text',
+    });
+  }
+
+  analyzeRuleImpact(
+    inputs: Array<{
+      productId: string;
+      description?: DataProductDescription;
+      fields: FieldDefinition[];
+      sample: SampleSummary;
+      authorization: AuthorizationScope;
+      industry?: IndustryType;
+      customWeights?: Partial<ScoringWeights>;
+      industryConfigVersion?: string;
+    }>,
+    targetVersion: string,
+    options?: {
+      industry?: IndustryType;
+      baselineVersion?: string;
+    }
+  ): RuleImpactAnalysisResult {
+    const analyzer = new RuleImpactAnalyzer(this.engine);
+    return analyzer.analyzeBatchImpact(inputs as any[], targetVersion, options);
+  }
+
+  generateImpactAnalysisReport(
+    analysis: RuleImpactAnalysisResult,
+    format: 'text' | 'markdown' = 'text'
+  ): string {
+    return this.reportGenerator.generateImpactAnalysisReport(analysis, { format });
+  }
+
+  generateAuditDeliveryPackage(
+    batchResult: BatchScoringResult,
+    options?: {
+      applicationId?: string;
+      passThreshold?: number;
+      baselineResults?: ScoringResult[];
+      baselineLabel?: string;
+      targetLabel?: string;
+    }
+  ): AuditDeliveryPackage {
+    return this.reportGenerator.generateAuditDeliveryPackage(batchResult, {
+      ...options,
+      passThreshold: options?.passThreshold ?? this.options.auditPassThreshold,
+    });
+  }
+
+  generateAuditDeliveryPackageText(
+    batchResult: BatchScoringResult,
+    options?: {
+      applicationId?: string;
+      format?: 'text' | 'markdown';
+      passThreshold?: number;
+      baselineResults?: ScoringResult[];
+      baselineLabel?: string;
+      targetLabel?: string;
+    }
+  ): string {
+    return this.reportGenerator.generateAuditDeliveryPackageText(batchResult, {
+      ...options,
+      passThreshold: options?.passThreshold ?? this.options.auditPassThreshold,
+    });
+  }
+
+  overrideIndustryRule(
+    industry: IndustryType,
+    version: string,
+    config: IndustryRequiredFieldsConfig
+  ): void {
+    this.ruleRegistry.overrideRule(industry, version, config);
   }
 }
 

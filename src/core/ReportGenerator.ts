@@ -8,6 +8,10 @@ import {
   RuleFallbackInfo,
   RiskItem,
   ScoringComparisonResult,
+  AuditDeliveryPackage,
+  MultiScoringComparisonResult,
+  RuleImpactAnalysisResult,
+  RuleStatus,
 } from '../types';
 import {
   safePercentage,
@@ -1144,6 +1148,652 @@ export class ReportGenerator {
     lines.push('---');
     lines.push('*批量报告结束*');
     return lines.join('\n');
+  }
+
+  generateImpactAnalysisReport(
+    analysis: RuleImpactAnalysisResult,
+    options: { format?: 'text' | 'markdown' } = {}
+  ): string {
+    const format = options.format || 'text';
+    return format === 'markdown'
+      ? this.formatImpactAnalysisMarkdown(analysis)
+      : this.formatImpactAnalysisPlain(analysis);
+  }
+
+  generateMultiComparisonReport(
+    comparison: MultiScoringComparisonResult,
+    options: { format?: 'text' | 'markdown' } = {}
+  ): string {
+    const format = options.format || 'text';
+    return format === 'markdown'
+      ? this.formatMultiComparisonMarkdown(comparison)
+      : this.formatMultiComparisonPlain(comparison);
+  }
+
+  generateAuditDeliveryPackage(
+    batchResult: BatchScoringResult,
+    options?: {
+      applicationId?: string;
+      format?: 'text' | 'markdown';
+      passThreshold?: number;
+      baselineResults?: ScoringResult[];
+      baselineLabel?: string;
+      targetLabel?: string;
+    }
+  ): AuditDeliveryPackage {
+    const format = options?.format || 'text';
+    const passThreshold = options?.passThreshold ?? DEFAULT_AUDIT_PASS_THRESHOLD;
+
+    const productReports = batchResult.results.map((result) => ({
+      productId: result.productId,
+      productName: result.productId,
+      auditReport: this.generateAuditSummaryReport(result, { passThreshold }),
+    }));
+
+    const passCount = productReports.filter((p) => p.auditReport.overallResult === 'PASS').length;
+    const failCount = productReports.filter((p) => p.auditReport.overallResult === 'FAIL').length;
+    const warningCount = productReports.filter((p) => p.auditReport.overallResult === 'WARNING').length;
+
+    const rectificationList = productReports
+      .filter((p) => p.auditReport.overallResult !== 'PASS')
+      .map((p) => {
+        const topPriority = p.auditReport.criticalFailures.length > 0 ? 'critical' :
+          p.auditReport.highPriorityRisks.length > 0 ? 'high' : 'medium';
+        return {
+          productId: p.productId,
+          productName: p.productName,
+          priority: topPriority as 'critical' | 'high' | 'medium' | 'low',
+          issues: [...p.auditReport.criticalFailures, ...p.auditReport.highPriorityRisks],
+          suggestions: p.auditReport.rectificationPlan.map((plan) => plan.action),
+        };
+      });
+
+    let comparisonConclusion: AuditDeliveryPackage['comparisonConclusion'] | undefined;
+    if (options?.baselineResults && options.baselineResults.length > 0) {
+      const baseline = options.baselineResults;
+      const target = batchResult.results;
+      let improved = 0;
+      let declined = 0;
+      const gradeOrder: QualityGrade[] = ['S', 'A', 'B', 'C', 'D'];
+
+      for (let i = 0; i < Math.min(baseline.length, target.length); i++) {
+        const baseGradeIdx = gradeOrder.indexOf(baseline[i].grade);
+        const targetGradeIdx = gradeOrder.indexOf(target[i].grade);
+        if (targetGradeIdx < baseGradeIdx) improved++;
+        else if (targetGradeIdx > baseGradeIdx) declined++;
+      }
+
+      const baseScore = baseline.reduce((sum, r) => sum + safePercentage(r.totalScore, r.maxScore), 0) / baseline.length;
+      const targetScore = target.reduce((sum, r) => sum + safePercentage(r.totalScore, r.maxScore), 0) / target.length;
+
+      comparisonConclusion = {
+        hasComparison: true,
+        baselineLabel: options.baselineLabel || '基线版本',
+        targetLabel: options.targetLabel || '当前版本',
+        overallImprovement: Math.round((targetScore - baseScore) * 100) / 100,
+        gradeImprovedCount: improved,
+        gradeDeclinedCount: declined,
+        keyFindings: [
+          `整体平均分变化: ${baseScore.toFixed(2)}% → ${targetScore.toFixed(2)}%`,
+          `等级提升产品数: ${improved} 个`,
+          `等级下降产品数: ${declined} 个`,
+        ],
+      };
+    }
+
+    const firstResult = batchResult.results[0];
+    const ruleInfo = {
+      industry: firstResult?.metadata.industry || 'general',
+      version: firstResult?.metadata.industryConfigVersion || 'default',
+      description: firstResult?.metadata.industryConfigDescription || '默认规则',
+      status: (firstResult?.metadata.industryConfigStatus as RuleStatus) || 'published',
+      source: firstResult?.metadata.industryConfigSource || 'built-in',
+    };
+
+    return {
+      packageId: `audit-pkg-${Date.now()}`,
+      applicationId: options?.applicationId,
+      createdAt: new Date().toISOString(),
+      summary: {
+        totalProducts: batchResult.results.length,
+        passCount,
+        failCount,
+        warningCount,
+        overallPassRate: batchResult.results.length > 0
+          ? Math.round((passCount / batchResult.results.length) * 10000) / 100
+          : 0,
+      },
+      productReports,
+      batchSummary: batchResult.summary,
+      rectificationList,
+      comparisonConclusion,
+      ruleInfo,
+    };
+  }
+
+  generateAuditDeliveryPackageText(
+    batchResult: BatchScoringResult,
+    options?: {
+      applicationId?: string;
+      format?: 'text' | 'markdown';
+      passThreshold?: number;
+      baselineResults?: ScoringResult[];
+      baselineLabel?: string;
+      targetLabel?: string;
+    }
+  ): string {
+    const pkg = this.generateAuditDeliveryPackage(batchResult, options);
+    const format = options?.format || 'text';
+    return format === 'markdown'
+      ? this.formatAuditDeliveryPackageMarkdown(pkg)
+      : this.formatAuditDeliveryPackagePlain(pkg);
+  }
+
+  private formatAuditDeliveryPackagePlain(pkg: AuditDeliveryPackage): string {
+    const lines: string[] = [];
+    lines.push('========================================');
+    lines.push('      数据产品上架审核材料包');
+    lines.push('========================================');
+    lines.push('');
+    lines.push(`材料包编号: ${pkg.packageId}`);
+    if (pkg.applicationId) lines.push(`上架申请号: ${pkg.applicationId}`);
+    lines.push(`生成时间: ${pkg.createdAt}`);
+    lines.push(`规则版本: ${pkg.ruleInfo.industry} / ${pkg.ruleInfo.version}`);
+    lines.push(`规则状态: ${this.getRuleStatusLabel(pkg.ruleInfo.status)}`);
+    lines.push('');
+
+    lines.push('【一、审核汇总】');
+    lines.push(`  总产品数: ${pkg.summary.totalProducts} 个`);
+    lines.push(`  通过: ${pkg.summary.passCount} 个`);
+    lines.push(`  不通过: ${pkg.summary.failCount} 个`);
+    lines.push(`  需关注: ${pkg.summary.warningCount} 个`);
+    lines.push(`  整体通过率: ${pkg.summary.overallPassRate}%`);
+    lines.push('');
+
+    lines.push('【二、批量汇总分析】');
+    lines.push(`  平均分: ${pkg.batchSummary.averageScore.toFixed(2)}%`);
+    lines.push(`  等级分布:`);
+    for (const grade of ['S', 'A', 'B', 'C', 'D'] as QualityGrade[]) {
+      const count = pkg.batchSummary.gradeDistribution[grade];
+      if (count > 0) lines.push(`    ${grade}: ${count} 个`);
+    }
+    lines.push('');
+
+    if (pkg.batchSummary.highFrequencyRisks.length > 0) {
+      lines.push('  高频风险 TOP 5:');
+      for (const r of pkg.batchSummary.highFrequencyRisks.slice(0, 5)) {
+        lines.push(`    [${this.getRiskLevelLabel(r.level)}] ${r.message} (${r.occurrencePercentage}%)`);
+      }
+      lines.push('');
+    }
+
+    if (pkg.batchSummary.groupByCategory && pkg.batchSummary.groupByCategory.length > 0) {
+      lines.push('  按风险类别汇总:');
+      for (const g of pkg.batchSummary.groupByCategory) {
+        lines.push(`    ${g.groupName}: ${g.totalItems} 个产品`);
+      }
+      lines.push('');
+    }
+
+    lines.push('【三、各产品审核摘要】');
+    for (let i = 0; i < pkg.productReports.length; i++) {
+      const pr = pkg.productReports[i];
+      lines.push(`  ${i + 1}. ${pr.productId} ${pr.productName ? `(${pr.productName})` : ''}`);
+      lines.push(`     结果: ${pr.auditReport.overallResult} | 得分: ${pr.auditReport.totalScore}分 | 等级: ${pr.auditReport.grade}`);
+      if (pr.auditReport.criticalFailures.length > 0) {
+        lines.push(`     致命问题: ${pr.auditReport.criticalFailures.length} 项`);
+      }
+      if (pr.auditReport.highPriorityRisks.length > 0) {
+        lines.push(`     高优先级风险: ${pr.auditReport.highPriorityRisks.length} 项`);
+      }
+    }
+    lines.push('');
+
+    if (pkg.rectificationList.length > 0) {
+      lines.push('【四、整改清单】');
+      for (let i = 0; i < pkg.rectificationList.length; i++) {
+        const rect = pkg.rectificationList[i];
+        lines.push(`  ${i + 1}. ${rect.productId} [优先级: ${rect.priority.toUpperCase()}]`);
+        lines.push(`     问题数: ${rect.issues.length} 个`);
+        if (rect.suggestions.length > 0) {
+          lines.push(`     整改建议:`);
+          for (const s of rect.suggestions.slice(0, 3)) {
+            lines.push(`       - ${s}`);
+          }
+        }
+      }
+      lines.push('');
+    }
+
+    if (pkg.comparisonConclusion && pkg.comparisonConclusion.hasComparison) {
+      lines.push('【五、对比结论】');
+      lines.push(`  基线: ${pkg.comparisonConclusion.baselineLabel} → 目标: ${pkg.comparisonConclusion.targetLabel}`);
+      lines.push(`  整体平均分变化: ${pkg.comparisonConclusion.overallImprovement > 0 ? '+' : ''}${pkg.comparisonConclusion.overallImprovement}%`);
+      lines.push(`  等级提升: ${pkg.comparisonConclusion.gradeImprovedCount} 个 | 等级下降: ${pkg.comparisonConclusion.gradeDeclinedCount} 个`);
+      lines.push('');
+    }
+
+    lines.push('【六、规则信息】');
+    lines.push(`  行业: ${pkg.ruleInfo.industry}`);
+    lines.push(`  版本: ${pkg.ruleInfo.version}`);
+    lines.push(`  说明: ${pkg.ruleInfo.description}`);
+    lines.push(`  状态: ${this.getRuleStatusLabel(pkg.ruleInfo.status)}`);
+    lines.push(`  来源: ${pkg.ruleInfo.source}`);
+    lines.push('');
+    lines.push('========================================');
+    lines.push('        材料包生成完毕');
+    lines.push('========================================');
+
+    return lines.join('\n');
+  }
+
+  private formatAuditDeliveryPackageMarkdown(pkg: AuditDeliveryPackage): string {
+    const lines: string[] = [];
+    lines.push('# 数据产品上架审核材料包');
+    lines.push('');
+    lines.push(`> 材料包编号：\`${pkg.packageId}\``);
+    if (pkg.applicationId) lines.push(`> 上架申请号：\`${pkg.applicationId}\``);
+    lines.push(`> 生成时间：${pkg.createdAt}`);
+    lines.push(`> 规则版本：${pkg.ruleInfo.industry} / ${pkg.ruleInfo.version} (${this.getRuleStatusLabel(pkg.ruleInfo.status)})`);
+    lines.push('');
+
+    lines.push('## 一、审核汇总');
+    lines.push('');
+    lines.push('| 指标 | 数量 |');
+    lines.push('| :--- | ---: |');
+    lines.push(`| 总产品数 | ${pkg.summary.totalProducts} 个 |`);
+    lines.push(`| ✅ 通过 | ${pkg.summary.passCount} 个 |`);
+    lines.push(`| ❌ 不通过 | ${pkg.summary.failCount} 个 |`);
+    lines.push(`| ⚠️  需关注 | ${pkg.summary.warningCount} 个 |`);
+    lines.push(`| 整体通过率 | **${pkg.summary.overallPassRate}%** |`);
+    lines.push('');
+
+    lines.push('## 二、批量汇总分析');
+    lines.push('');
+    lines.push(`### 2.1 等级分布`);
+    lines.push('');
+    lines.push('| 等级 | 数量 | 占比 |');
+    lines.push('| :--- | ---: | ---: |');
+    for (const grade of ['S', 'A', 'B', 'C', 'D'] as QualityGrade[]) {
+      const count = pkg.batchSummary.gradeDistribution[grade];
+      const pct = pkg.summary.totalProducts > 0 ? ((count / pkg.summary.totalProducts) * 100).toFixed(1) : '0.0';
+      lines.push(`| ${this.getGradeEmoji(grade)} ${grade} | ${count} 个 | ${pct}% |`);
+    }
+    lines.push('');
+
+    if (pkg.batchSummary.highFrequencyRisks.length > 0) {
+      lines.push('### 2.2 高频风险 TOP 10');
+      lines.push('');
+      lines.push('| 级别 | 风险描述 | 出现次数 | 占比 |');
+      lines.push('| :--- | :--- | ---: | ---: |');
+      for (const r of pkg.batchSummary.highFrequencyRisks) {
+        lines.push(`| ${this.getRiskLevelLabel(r.level)} | ${r.message} | ${r.occurrenceCount} | ${r.occurrencePercentage}% |`);
+      }
+      lines.push('');
+    }
+
+    if (pkg.batchSummary.groupByCategory && pkg.batchSummary.groupByCategory.length > 0) {
+      lines.push('### 2.3 按风险类别汇总');
+      lines.push('');
+      lines.push('| 风险类别 | 影响产品数 | 平均分 |');
+      lines.push('| :--- | ---: | ---: |');
+      for (const g of pkg.batchSummary.groupByCategory) {
+        lines.push(`| ${g.groupName} | ${g.totalItems} 个 | ${g.averageScore}% |`);
+      }
+      lines.push('');
+    }
+
+    if (pkg.batchSummary.groupByIndustry && pkg.batchSummary.groupByIndustry.length > 0) {
+      lines.push('### 2.4 按行业分组汇总');
+      lines.push('');
+      lines.push('| 行业 | 产品数 | 平均分 | 等级分布 |');
+      lines.push('| :--- | ---: | ---: | :--- |');
+      for (const g of pkg.batchSummary.groupByIndustry) {
+        const dist = `S${g.gradeDistribution.S} A${g.gradeDistribution.A} B${g.gradeDistribution.B} C${g.gradeDistribution.C} D${g.gradeDistribution.D}`;
+        lines.push(`| ${g.groupName} | ${g.totalItems} | ${g.averageScore}% | ${dist} |`);
+      }
+      lines.push('');
+    }
+
+    lines.push('## 三、各产品审核摘要');
+    lines.push('');
+    for (let i = 0; i < pkg.productReports.length; i++) {
+      const pr = pkg.productReports[i];
+      const resultEmoji = pr.auditReport.overallResult === 'PASS' ? '✅' :
+        pr.auditReport.overallResult === 'FAIL' ? '❌' : '⚠️';
+      lines.push(`### ${i + 1}. ${pr.productId} ${pr.productName ? `(${pr.productName})` : ''}`);
+      lines.push('');
+      lines.push(`- **审核结果**：${resultEmoji} ${pr.auditReport.overallResult}`);
+      lines.push(`- **综合得分**：${pr.auditReport.totalScore} / ${pr.auditReport.maxScore} 分`);
+      lines.push(`- **质量等级**：${this.getGradeEmoji(pr.auditReport.grade)} ${pr.auditReport.grade}`);
+      if (pr.auditReport.criticalFailures.length > 0) {
+        lines.push(`- **致命问题**：${pr.auditReport.criticalFailures.length} 项`);
+      }
+      if (pr.auditReport.highPriorityRisks.length > 0) {
+        lines.push(`- **高优先级风险**：${pr.auditReport.highPriorityRisks.length} 项`);
+      }
+      lines.push('');
+    }
+
+    if (pkg.rectificationList.length > 0) {
+      lines.push('## 四、整改清单');
+      lines.push('');
+      lines.push('| 序号 | 产品ID | 优先级 | 问题数 | 核心整改建议 |');
+      lines.push('| ---: | :--- | :---: | ---: | :--- |');
+      for (let i = 0; i < pkg.rectificationList.length; i++) {
+        const rect = pkg.rectificationList[i];
+        const topSuggestion = rect.suggestions[0] || '详见详细报告';
+        lines.push(`| ${i + 1} | ${rect.productId} | **${rect.priority.toUpperCase()}** | ${rect.issues.length} | ${topSuggestion} |`);
+      }
+      lines.push('');
+    }
+
+    if (pkg.comparisonConclusion && pkg.comparisonConclusion.hasComparison) {
+      lines.push('## 五、对比结论');
+      lines.push('');
+      lines.push(`> 对比基准：**${pkg.comparisonConclusion.baselineLabel}** → **${pkg.comparisonConclusion.targetLabel}**`);
+      lines.push('');
+      lines.push('| 指标 | 数值 |');
+      lines.push('| :--- | ---: |');
+      lines.push(`| 整体平均分变化 | ${pkg.comparisonConclusion.overallImprovement > 0 ? '+' : ''}${pkg.comparisonConclusion.overallImprovement}% |`);
+      lines.push(`| 等级提升产品数 | ${pkg.comparisonConclusion.gradeImprovedCount} 个 |`);
+      lines.push(`| 等级下降产品数 | ${pkg.comparisonConclusion.gradeDeclinedCount} 个 |`);
+      lines.push('');
+      lines.push('### 关键发现');
+      lines.push('');
+      for (const finding of pkg.comparisonConclusion.keyFindings) {
+        lines.push(`- ${finding}`);
+      }
+      lines.push('');
+    }
+
+    lines.push('## 六、规则信息');
+    lines.push('');
+    lines.push('| 项目 | 内容 |');
+    lines.push('| :--- | :--- |');
+    lines.push(`| 适用行业 | ${pkg.ruleInfo.industry} |`);
+    lines.push(`| 规则版本 | ${pkg.ruleInfo.version} |`);
+    lines.push(`| 规则说明 | ${pkg.ruleInfo.description} |`);
+    lines.push(`| 规则状态 | ${this.getRuleStatusLabel(pkg.ruleInfo.status)} |`);
+    lines.push(`| 规则来源 | ${pkg.ruleInfo.source} |`);
+    lines.push('');
+
+    lines.push('---');
+    lines.push('*本材料包由数据质量评分 SDK 自动生成*');
+
+    return lines.join('\n');
+  }
+
+  private formatMultiComparisonPlain(cmp: MultiScoringComparisonResult): string {
+    const lines: string[] = [];
+    lines.push('========================================');
+    lines.push('     多方案评分对比报告');
+    lines.push('========================================');
+    lines.push('');
+    lines.push(`产品ID: ${cmp.productId}`);
+    lines.push(`生成时间: ${cmp.scoredAt}`);
+    lines.push('');
+
+    lines.push('【最佳方案】');
+    lines.push(`  ${cmp.bestScenario.label}: ${cmp.bestScenario.totalScorePercent}% (${cmp.bestScenario.grade})`);
+    lines.push(`  理由: ${cmp.bestScenario.reason}`);
+    lines.push('');
+
+    lines.push('【方案排名】');
+    for (let i = 0; i < cmp.scenarios.length; i++) {
+      const s = cmp.scenarios[i];
+      lines.push(`  ${i + 1}. ${s.label} — 得分: ${s.totalScorePercent}%, 等级: ${s.grade}`);
+    }
+    lines.push('');
+
+    lines.push('【维度对比】');
+    for (const dim of cmp.dimensionComparison) {
+      lines.push(`  ${dim.dimensionName}:`);
+      lines.push(`    最佳: ${dim.bestLabel} (${dim.scores[dim.bestLabel]}%)`);
+      lines.push(`    最差: ${dim.worstLabel} (${dim.scores[dim.worstLabel]}%)`);
+      lines.push(`    最大差值: ${dim.maxDiff}%`);
+    }
+    lines.push('');
+
+    lines.push('【风险对比】');
+    lines.push(`  各方案风险总数:`);
+    for (const label of Object.keys(cmp.riskComparison.totalRiskCounts)) {
+      const count = cmp.riskComparison.totalRiskCounts[label];
+      const criticalCount = cmp.riskComparison.criticalRiskCounts[label] || 0;
+      lines.push(`    ${label}: ${count} 项 (严重+高危 ${criticalCount} 项)`);
+    }
+    lines.push('');
+
+    return lines.join('\n');
+  }
+
+  private formatMultiComparisonMarkdown(cmp: MultiScoringComparisonResult): string {
+    const lines: string[] = [];
+    lines.push('# 多方案评分对比报告');
+    lines.push('');
+    lines.push(`> 产品ID：\`${cmp.productId}\``);
+    lines.push(`> 生成时间：${cmp.scoredAt}`);
+    lines.push('');
+
+    lines.push('## 🏆 最佳方案');
+    lines.push('');
+    lines.push(`**${cmp.bestScenario.label}** — ${cmp.bestScenario.totalScorePercent}% · ${cmp.bestScenario.grade}级`);
+    lines.push('');
+    lines.push(`> ${cmp.bestScenario.reason}`);
+    lines.push('');
+
+    lines.push('## 📊 方案排名');
+    lines.push('');
+    lines.push('| 排名 | 方案 | 总分 | 等级 |');
+    lines.push('| ---: | :--- | ---: | :---: |');
+    for (let i = 0; i < cmp.scenarios.length; i++) {
+      const s = cmp.scenarios[i];
+      lines.push(`| ${i + 1} | ${s.label} | ${s.totalScorePercent}% | ${this.getGradeEmoji(s.grade)} ${s.grade} |`);
+    }
+    lines.push('');
+
+    lines.push('## 📈 各维度得分对比');
+    lines.push('');
+    const headers = ['维度', ...cmp.scenarios.map((s) => s.label), '最佳', '最大差值'];
+    lines.push('| ' + headers.join(' | ') + ' |');
+    lines.push('| :--- |' + cmp.scenarios.map(() => ' ---: |').join('') + ' :--- | ---: |');
+    for (const dim of cmp.dimensionComparison) {
+      const scores = cmp.scenarios.map((s) => `${dim.scores[s.label]}%`).join(' | ');
+      lines.push(`| ${dim.dimensionName} | ${scores} | ${dim.bestLabel} | ${dim.maxDiff}% |`);
+    }
+    lines.push('');
+
+    lines.push('## ⚠️  风险对比');
+    lines.push('');
+    lines.push('| 方案 | 总风险数 | 严重+高危 | 新增风险数 | 已解决风险数 |');
+    lines.push('| :--- | ---: | ---: | ---: | ---: |');
+    for (const s of cmp.scenarios) {
+      const total = cmp.riskComparison.totalRiskCounts[s.label] || 0;
+      const critical = cmp.riskComparison.criticalRiskCounts[s.label] || 0;
+      const newRisks = cmp.riskComparison.newRisksPerScenario[s.label]?.length || 0;
+      const resolved = cmp.riskComparison.resolvedRisksPerScenario[s.label]?.length || 0;
+      lines.push(`| ${s.label} | ${total} | ${critical} | ${newRisks} | ${resolved} |`);
+    }
+    lines.push('');
+
+    lines.push('## 📉 低分维度对比');
+    lines.push('');
+    for (const s of cmp.scenarios) {
+      const lowDims = cmp.lowScoringDimensionsComparison[s.label] || [];
+      lines.push(`### ${s.label}`);
+      lines.push('');
+      if (lowDims.length === 0) {
+        lines.push('_无低分维度_');
+      } else {
+        lines.push('| 维度 | 得分 |');
+        lines.push('| :--- | ---: |');
+        for (const d of lowDims) {
+          lines.push(`| ${d.dimension} | ${d.averageScore}% |`);
+        }
+      }
+      lines.push('');
+    }
+
+    return lines.join('\n');
+  }
+
+  private formatImpactAnalysisPlain(analysis: RuleImpactAnalysisResult): string {
+    const lines: string[] = [];
+    lines.push('========================================');
+    lines.push('   规则变更影响分析报告');
+    lines.push('========================================');
+    lines.push('');
+    lines.push(`分析ID: ${analysis.analysisId}`);
+    lines.push(`行业: ${analysis.industry}`);
+    lines.push(`基线版本: ${analysis.baselineVersion}`);
+    lines.push(`目标版本: ${analysis.targetVersion}`);
+    lines.push(`分析时间: ${analysis.analyzedAt}`);
+    lines.push(`分析产品数: ${analysis.totalProducts} 个`);
+    lines.push('');
+
+    lines.push('【等级变化】');
+    lines.push(`  提升: ${analysis.gradeChanges.improved} 个`);
+    lines.push(`  下降: ${analysis.gradeChanges.declined} 个`);
+    lines.push(`  不变: ${analysis.gradeChanges.unchanged} 个`);
+    if (analysis.gradeChanges.declinedProducts.length > 0) {
+      lines.push(`  下降产品: ${analysis.gradeChanges.declinedProducts.slice(0, 5).join(', ')}${analysis.gradeChanges.declinedProducts.length > 5 ? '...' : ''}`);
+    }
+    lines.push('');
+
+    lines.push('【分数变化】');
+    lines.push(`  平均分变化: ${analysis.scoreChanges.averageScoreChange > 0 ? '+' : ''}${analysis.scoreChanges.averageScoreChange}%`);
+    lines.push(`  最大提升: +${analysis.scoreChanges.maxScoreIncrease}%`);
+    lines.push(`  最大下降: ${analysis.scoreChanges.maxScoreDecrease}%`);
+    lines.push('');
+
+    if (analysis.newRisks.length > 0) {
+      lines.push('【新增风险】');
+      for (const r of analysis.newRisks.slice(0, 5)) {
+        lines.push(`  [${this.getRiskLevelLabel(r.level)}] ${r.message} — ${r.occurrenceCount}/${analysis.totalProducts} (${r.occurrencePercentage}%)`);
+      }
+      lines.push('');
+    }
+
+    if (analysis.resolvedRisks.length > 0) {
+      lines.push('【已解决风险】');
+      for (const r of analysis.resolvedRisks.slice(0, 5)) {
+        lines.push(`  [${this.getRiskLevelLabel(r.level)}] ${r.message} — ${r.occurrenceCount}/${analysis.totalProducts} (${r.occurrencePercentage}%)`);
+      }
+      lines.push('');
+    }
+
+    lines.push('【维度影响】');
+    for (const dim of analysis.dimensionImpact) {
+      const change = dim.averageScoreChange;
+      lines.push(`  ${dim.dimensionName}: ${change > 0 ? '+' : ''}${change}% (改善 ${dim.productsImproved}个, 恶化 ${dim.productsWorsened}个)`);
+    }
+    lines.push('');
+
+    if (analysis.recommendations.length > 0) {
+      lines.push('【发布建议】');
+      for (let i = 0; i < analysis.recommendations.length; i++) {
+        lines.push(`  ${i + 1}. ${analysis.recommendations[i]}`);
+      }
+      lines.push('');
+    }
+
+    return lines.join('\n');
+  }
+
+  private formatImpactAnalysisMarkdown(analysis: RuleImpactAnalysisResult): string {
+    const lines: string[] = [];
+    lines.push('# 规则变更影响分析报告');
+    lines.push('');
+    lines.push(`> 分析ID：\`${analysis.analysisId}\``);
+    lines.push(`> 行业：${analysis.industry}`);
+    lines.push(`> 规则版本：${analysis.baselineVersion} → ${analysis.targetVersion}`);
+    lines.push(`> 分析时间：${analysis.analyzedAt}`);
+    lines.push(`> 分析产品数：${analysis.totalProducts} 个`);
+    lines.push('');
+
+    lines.push('## 📊 等级变化');
+    lines.push('');
+    lines.push('| 变化类型 | 产品数 | 占比 |');
+    lines.push('| :--- | ---: | ---: |');
+    const total = analysis.totalProducts;
+    lines.push(`| ⬆️ 等级提升 | ${analysis.gradeChanges.improved} 个 | ${((analysis.gradeChanges.improved / total) * 100).toFixed(1)}% |`);
+    lines.push(`| ⬇️ 等级下降 | ${analysis.gradeChanges.declined} 个 | ${((analysis.gradeChanges.declined / total) * 100).toFixed(1)}% |`);
+    lines.push(`| ➡️ 等级不变 | ${analysis.gradeChanges.unchanged} 个 | ${((analysis.gradeChanges.unchanged / total) * 100).toFixed(1)}% |`);
+    lines.push('');
+
+    lines.push('## 📈 分数变化');
+    lines.push('');
+    lines.push('| 指标 | 数值 |');
+    lines.push('| :--- | ---: |');
+    lines.push(`| 平均分变化 | ${analysis.scoreChanges.averageScoreChange > 0 ? '+' : ''}${analysis.scoreChanges.averageScoreChange}% |`);
+    lines.push(`| 最大提升 | +${analysis.scoreChanges.maxScoreIncrease}% |`);
+    lines.push(`| 最大下降 | ${analysis.scoreChanges.maxScoreDecrease}% |`);
+    lines.push('');
+
+    if (analysis.newRisks.length > 0) {
+      lines.push('## 🆕 新增风险');
+      lines.push('');
+      lines.push('| 级别 | 风险描述 | 影响产品数 | 占比 |');
+      lines.push('| :--- | :--- | ---: | ---: |');
+      for (const r of analysis.newRisks.slice(0, 10)) {
+        lines.push(`| ${this.getRiskLevelLabel(r.level)} | ${r.message} | ${r.occurrenceCount} | ${r.occurrencePercentage}% |`);
+      }
+      lines.push('');
+    }
+
+    if (analysis.resolvedRisks.length > 0) {
+      lines.push('## ✅ 已解决风险');
+      lines.push('');
+      lines.push('| 级别 | 风险描述 | 影响产品数 | 占比 |');
+      lines.push('| :--- | :--- | ---: | ---: |');
+      for (const r of analysis.resolvedRisks.slice(0, 10)) {
+        lines.push(`| ${this.getRiskLevelLabel(r.level)} | ${r.message} | ${r.occurrenceCount} | ${r.occurrencePercentage}% |`);
+      }
+      lines.push('');
+    }
+
+    lines.push('## 📐 各维度影响');
+    lines.push('');
+    lines.push('| 维度 | 平均分变化 | 改善产品数 | 恶化产品数 |');
+    lines.push('| :--- | ---: | ---: | ---: |');
+    for (const dim of analysis.dimensionImpact) {
+      const change = dim.averageScoreChange;
+      lines.push(`| ${dim.dimensionName} | ${change > 0 ? '+' : ''}${change}% | ${dim.productsImproved} | ${dim.productsWorsened} |`);
+    }
+    lines.push('');
+
+    if (analysis.riskCategoryImpact.length > 0) {
+      lines.push('## 🏷️  风险类别影响');
+      lines.push('');
+      lines.push('| 风险类别 | 基线产品数 | 目标产品数 | 变化 |');
+      lines.push('| :--- | ---: | ---: | ---: |');
+      for (const cat of analysis.riskCategoryImpact) {
+        const change = cat.change;
+        lines.push(`| ${cat.category} | ${cat.baselineCount} | ${cat.targetCount} | ${change > 0 ? '+' : ''}${change} |`);
+      }
+      lines.push('');
+    }
+
+    if (analysis.recommendations.length > 0) {
+      lines.push('## 💡 发布建议');
+      lines.push('');
+      for (let i = 0; i < analysis.recommendations.length; i++) {
+        lines.push(`${i + 1}. ${analysis.recommendations[i]}`);
+      }
+      lines.push('');
+    }
+
+    return lines.join('\n');
+  }
+
+  private getRuleStatusLabel(status: RuleStatus): string {
+    const labels: Record<RuleStatus, string> = {
+      draft: '草稿',
+      trial: '试运行',
+      published: '已发布',
+      deprecated: '已停用',
+    };
+    return labels[status] || status;
   }
 
   private getGradeEmoji(grade: QualityGrade): string {

@@ -117,6 +117,10 @@ export interface FieldCompletenessResult {
   fieldsWithoutDescription: string[];
   ruleVersion?: string;
   ruleDescription?: string;
+  ruleSource?: 'built-in' | 'custom' | 'override';
+  ruleStatus?: RuleStatus;
+  ruleEffectiveAt?: string;
+  isOverridden?: boolean;
 }
 
 export interface SampleCompletenessResult {
@@ -216,6 +220,8 @@ export interface LowScoringDimension {
   affectedProducts: string[];
 }
 
+export type RuleStatus = 'draft' | 'trial' | 'published' | 'deprecated';
+
 export interface IndustryRequiredFieldsConfig {
   version?: string;
   required: string[];
@@ -225,6 +231,11 @@ export interface IndustryRequiredFieldsConfig {
   effectiveAt?: string;
   deprecatedAt?: string;
   source?: 'built-in' | 'custom' | 'override';
+  status?: RuleStatus;
+  trialStartAt?: string;
+  trialEndAt?: string;
+  publishedAt?: string;
+  changeLog?: string;
 }
 
 export interface RegisteredIndustryConfig extends IndustryRequiredFieldsConfig {
@@ -233,6 +244,7 @@ export interface RegisteredIndustryConfig extends IndustryRequiredFieldsConfig {
   registeredAt: string;
   isDefault: boolean;
   source: 'built-in' | 'custom' | 'override';
+  status: RuleStatus;
 }
 
 export interface RuleQueryResult {
@@ -241,6 +253,15 @@ export interface RuleQueryResult {
   isLatest: boolean;
   fallbackReason?: string;
   availableVersions: string[];
+  statusFilterApplied?: boolean;
+}
+
+export interface RuleStatusTransition {
+  fromStatus: RuleStatus;
+  toStatus: RuleStatus;
+  changedAt: string;
+  changedBy?: string;
+  remark?: string;
 }
 
 export interface RuleFallbackInfo {
@@ -287,6 +308,8 @@ export interface ScoringResult {
     industryConfigVersion?: string;
     industryConfigDescription?: string;
     industryConfigSource?: 'built-in' | 'custom' | 'override';
+    industryConfigStatus?: RuleStatus;
+    industryConfigEffectiveAt?: string;
     ruleFallbackReason?: string;
   };
 }
@@ -426,4 +449,143 @@ export interface SDKOptions {
   }>;
   defaultIndustryConfigVersion?: string;
   auditPassThreshold?: number;
+  usePublishedRulesOnly?: boolean;
+  allowTrialRules?: boolean;
+}
+
+export interface AuditDeliveryPackage {
+  packageId: string;
+  applicationId?: string;
+  createdAt: string;
+  summary: {
+    totalProducts: number;
+    passCount: number;
+    failCount: number;
+    warningCount: number;
+    overallPassRate: number;
+  };
+  productReports: Array<{
+    productId: string;
+    productName?: string;
+    auditReport: AuditSummaryReport;
+  }>;
+  batchSummary: BatchScoringResult['summary'];
+  rectificationList: Array<{
+    productId: string;
+    productName?: string;
+    priority: 'critical' | 'high' | 'medium' | 'low';
+    issues: RiskItem[];
+    suggestions: string[];
+  }>;
+  comparisonConclusion?: {
+    hasComparison: boolean;
+    baselineLabel?: string;
+    targetLabel?: string;
+    overallImprovement: number;
+    gradeImprovedCount: number;
+    gradeDeclinedCount: number;
+    keyFindings: string[];
+  };
+  ruleInfo: {
+    industry: string;
+    version: string;
+    description: string;
+    status: RuleStatus;
+    source: string;
+  };
+}
+
+export interface MultiScoringComparisonResult {
+  productId: string;
+  scenarios: Array<{
+    label: string;
+    result: ScoringResult;
+    totalScorePercent: number;
+    grade: QualityGrade;
+    rank?: number;
+  }>;
+  bestScenario: {
+    label: string;
+    totalScorePercent: number;
+    grade: QualityGrade;
+    reason: string;
+  };
+  worstScenario: {
+    label: string;
+    totalScorePercent: number;
+    grade: QualityGrade;
+    reason: string;
+  };
+  dimensionComparison: Array<{
+    dimensionKey: keyof ScoringWeights;
+    dimensionName: string;
+    scores: Record<string, number>;
+    bestLabel: string;
+    worstLabel: string;
+    maxDiff: number;
+  }>;
+  riskComparison: {
+    totalRiskCounts: Record<string, number>;
+    criticalRiskCounts: Record<string, number>;
+    newRisksPerScenario: Record<string, RiskItem[]>;
+    resolvedRisksPerScenario: Record<string, RiskItem[]>;
+  };
+  lowScoringDimensionsComparison: Record<string, LowScoringDimension[]>;
+  scoredAt: string;
+}
+
+export interface MultiComparisonOptions {
+  labels?: string[];
+  lowScoreThreshold?: number;
+  bestScoreCriteria?: 'highestScore' | 'leastRisks' | 'bestGrade' | 'leastLowDimensions';
+}
+
+export interface RuleImpactAnalysisResult {
+  analysisId: string;
+  industry: string;
+  baselineVersion: string;
+  targetVersion: string;
+  analyzedAt: string;
+  totalProducts: number;
+  gradeDistribution: {
+    baseline: Record<QualityGrade, number>;
+    target: Record<QualityGrade, number>;
+  };
+  gradeChanges: {
+    improved: number;
+    declined: number;
+    unchanged: number;
+    improvedProducts: string[];
+    declinedProducts: string[];
+  };
+  scoreChanges: {
+    averageScoreChange: number;
+    maxScoreIncrease: number;
+    maxScoreDecrease: number;
+  };
+  newRisks: HighFrequencyRisk[];
+  resolvedRisks: HighFrequencyRisk[];
+  increasedRisks: HighFrequencyRisk[];
+  dimensionImpact: Array<{
+    dimensionKey: keyof ScoringWeights;
+    dimensionName: string;
+    averageScoreChange: number;
+    productsWorsened: number;
+    productsImproved: number;
+  }>;
+  riskCategoryImpact: Array<{
+    category: string;
+    baselineCount: number;
+    targetCount: number;
+    change: number;
+  }>;
+  recommendations: string[];
+}
+
+export interface RuleImpactAnalysisOptions {
+  industry?: string;
+  baselineVersion?: string;
+  targetVersion?: string;
+  includeProductDetails?: boolean;
+  riskThreshold?: RiskLevel;
 }

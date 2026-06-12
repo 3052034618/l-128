@@ -24,22 +24,37 @@ export class FieldCompletenessValidator {
   validate(
     fields: FieldDefinition[],
     industry: IndustryType = 'general',
-    version?: string
+    version?: string,
+    options?: {
+      allowTrial?: boolean;
+      allowDraft?: boolean;
+      allowDeprecated?: boolean;
+    }
   ): { result: FieldCompletenessResult; risks: RiskItem[] } {
     this.logger.info('FieldCompletenessValidator', `开始校验字段完整性，行业: ${industry}, 版本: ${version || '默认'}`);
 
     let industryConfig = getIndustryConfig(industry, this.customIndustryConfigs);
+    let ruleSource: 'built-in' | 'custom' | 'override' = 'built-in';
+    let isOverridden = false;
+
     try {
       const ruleRegistry = IndustryRuleRegistry.getInstance();
-      const registryResult = ruleRegistry.getRuleWithFallbackInfo(industry, version, 'general');
+      const registryResult = ruleRegistry.getRuleWithFallbackInfo(industry, version, {
+        defaultIndustry: 'general',
+        allowTrial: options?.allowTrial || false,
+        allowDraft: options?.allowDraft || false,
+        allowDeprecated: options?.allowDeprecated || false,
+      });
       industryConfig = {
         ...registryResult.config,
         key: registryResult.config.industry,
       };
+      ruleSource = registryResult.config.source || 'built-in';
+      isOverridden = registryResult.config.source === 'override';
     } catch (e: any) {
       this.logger.warn('FieldCompletenessValidator', `规则注册中心查询失败，使用默认配置: ${e.message}`);
     }
-    this.logger.debug('FieldCompletenessValidator', `使用行业配置: ${industryConfig.description} (version: ${industryConfig.version || 'unknown'})`);
+    this.logger.debug('FieldCompletenessValidator', `使用行业配置: ${industryConfig.description} (version: ${industryConfig.version || 'unknown'}, source: ${ruleSource})`);
 
     const fieldNames = fields.map((f) => f.name);
 
@@ -159,6 +174,10 @@ export class FieldCompletenessValidator {
       fieldsWithoutDescription,
       ruleVersion: industryConfig.version,
       ruleDescription: industryConfig.description,
+      ruleSource,
+      ruleStatus: (industryConfig as any).status,
+      ruleEffectiveAt: (industryConfig as any).publishedAt || (industryConfig as any).effectiveAt,
+      isOverridden,
     };
 
     this.logger.info('FieldCompletenessValidator', `字段完整性校验完成，得分: ${score}/${maxScore}`);
